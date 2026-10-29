@@ -3,6 +3,7 @@
 //! одночасно зі спільною таблицею (Lazy SMP); головний потік стежить за часом і пише UCI.
 
 use crate::eval::{evaluate, SEE_VALUE};
+use crate::nnue::{feature, Network};
 use crate::position::{MoveList, Position};
 use crate::see::see_ge;
 use crate::tt::*;
@@ -38,6 +39,8 @@ pub struct Shared {
     /// Відлік часу на хід (мкс від base): ponderhit переносить його на мить, коли пішов наш годинник.
     base: Instant,
     start_us: AtomicU64,
+    /// Нейромережа оцінки (None – ручна оцінка).
+    pub net: Option<&'static Network>,
 }
 
 impl Shared {
@@ -49,7 +52,13 @@ impl Shared {
             nodes: (0..threads.max(1)).map(|_| AtomicU64::new(0)).collect(),
             base: Instant::now(),
             start_us: AtomicU64::new(0),
+            net: None,
         }
+    }
+
+    pub fn with_net(mut self, net: Option<&'static Network>) -> Shared {
+        self.net = net;
+        self
     }
 
     pub fn restart_clock(&self) {
@@ -164,6 +173,8 @@ struct Worker<'a> {
     pv: Box<[[Move; MAX_PLY + 4]; MAX_PLY + 4]>,
     pv_len: [usize; MAX_PLY + 4],
     stopped: bool,
+    /// Накопичувачі мережі на кожну глибину: [глибина][бік][нейрон].
+    acc: Vec<i16>,
 }
 
 pub struct Report {
@@ -229,7 +240,113 @@ impl<'a> Worker<'a> {
             pv: Box::new([[Move::NONE; MAX_PLY + 4]; MAX_PLY + 4]),
             pv_len: [0; MAX_PLY + 4],
             stopped: false,
+            acc: vec![
+                0;
+                shared
+                    .net
+                    .map(|n| (MAX_PLY + 8) * 2 * n.hidden)
+                    .unwrap_or(0)
+            ],
         }
+    }
+
+    /// Накопичувачі для кореня – з нуля.
+    fn acc_root(&mut self, p: &Position) {
+        if let Some(net) = self.shared.net {
+            let h = net.hidden;
+            let mut acc = [Vec::with_capacity(h), Vec::with_capacity(h)];
+            net.accumulate(p, &mut acc);
+            self.acc[..h].copy_from_slice(&acc[0]);
+            self.acc[h..2 * h].copy_from_slice(&acc[1]);
+        }
+    }
+
+    /// Накопичувачі глибини ply + 1 після ходу m з позиції p (глибини ply); нульовий хід – копія.
+    fn acc_push(&mut self, p: &Position, m: Move, ply: usize) {
+        let Some(net) = self.shared.net else { return };
+        let h = net.hidden;
+        let (lo, hi) = self.acc.split_at_mut((ply + 1) * 2 * h);
+        let src = &lo[ply * 2 * h..];
+        let dst = &mut hi[..2 * h];
+        if m.is_none() {
+            dst.copy_from_slice(src);
+            return;
+        }
+        let us = p.side;
+        let (from, to) = (m.from(), m.to());
+        let piece = p.piece_at(from);
+        let mut adds: [(u8, Square); 2] = [(NO_PIECE, 0); 2];
+        let mut subs: [(u8, Square); 2] = [(NO_PIECE, 0); 2];
+        let (mut na, mut ns) = (0, 0);
+        if m.is_castle() {
+            let kingside = to > from;
+            let (kto, rto) = if kingside {
+                (relative_sq(us, 6), relative_sq(us, 5))
+            } else {
+                (relative_sq(us, 2), relative_sq(us, 3))
+            };
+            subs[0] = (piece, from);
+            subs[1] = (p.piece_at(to), to);
+            adds[0] = (piece, kto);
+            adds[1] = (p.piece_at(to), rto);
+            na = 2;
+            ns = 2;
+        } else {
+            subs[ns] = (piece, from);
+            ns += 1;
+            adds[na] = (
+                if m.is_promo() {
+                    piece_of(us, m.promo_kind())
+                } else {
+                    piece
+                },
+                to,
+            );
+            na += 1;
+            if m.is_ep() {
+                let cap = if us == WHITE { to - 8 } else { to + 8 };
+                subs[ns] = (p.piece_at(cap), cap);
+                ns += 1;
+            } else if p.piece_at(to) != NO_PIECE {
+                subs[ns] = (p.piece_at(to), to);
+                ns += 1;
+            }
+        }
+        for persp in 0..2 {
+            let mut a = [0usize; 2];
+            let mut r = [0usize; 2];
+            for i in 0..na {
+                a[i] = feature(persp, adds[i].0, adds[i].1);
+            }
+            for i in 0..ns {
+                r[i] = feature(persp, subs[i].0, subs[i].1);
+            }
+            net.update(
+                &src[persp * h..(persp + 1) * h],
+                &mut dst[persp * h..(persp + 1) * h],
+                &a[..na],
+                &r[..ns],
+            );
+        }
+    }
+
+    /// Статична оцінка: мережа або ручна; ближче до правила 50 ходів – ближче до нуля.
+    #[inline(always)]
+    fn static_eval(&self, p: &Position, ply: usize) -> i32 {
+        let v = match self.shared.net {
+            Some(net) => {
+                let h = net.hidden;
+                let base = ply * 2 * h;
+                let (white, black) = (&self.acc[base..base + h], &self.acc[base + h..base + 2 * h]);
+                if p.side == WHITE {
+                    net.output(white, black)
+                } else {
+                    net.output(black, white)
+                }
+            }
+            None => evaluate(p),
+        };
+        v * (200 - p.halfmove.min(100) as i32) / 200
     }
 
     #[inline(always)]
@@ -365,7 +482,7 @@ impl<'a> Worker<'a> {
             return 0;
         }
         if ply >= MAX_PLY {
-            return evaluate(p);
+            return self.static_eval(p, ply);
         }
         let in_check = p.in_check();
         let tt = self.shared.tt.probe(p.key);
@@ -384,7 +501,9 @@ impl<'a> Worker<'a> {
             stand = -INF;
             best = -MATE + ply as i32;
         } else {
-            stand = tt.map(|e| e.eval).unwrap_or_else(|| evaluate(p));
+            stand = tt
+                .map(|e| e.eval)
+                .unwrap_or_else(|| self.static_eval(p, ply));
             best = stand;
             if stand >= beta {
                 return stand;
@@ -430,6 +549,7 @@ impl<'a> Worker<'a> {
                 }
             }
             let child = p.make(m);
+            self.acc_push(p, m, ply);
             self.push(ply, m, p.piece_at(m.from()), child.key);
             let score = -self.quiescence(&child, -beta, -alpha, ply + 1);
             self.pop();
@@ -498,7 +618,7 @@ impl<'a> Worker<'a> {
                 return 1 - (self.nodes & 2) as i32;
             }
             if ply >= MAX_PLY {
-                return evaluate(p);
+                return self.static_eval(p, ply);
             }
             // Найкоротший мат: далі шукати немає сенсу.
             alpha = alpha.max(-MATE + ply as i32);
@@ -542,7 +662,7 @@ impl<'a> Worker<'a> {
             }
             v
         } else {
-            evaluate(p)
+            self.static_eval(p, ply)
         };
         self.eval_stack[ply] = eval;
         let improving = !in_check && ply >= 2 && eval > self.eval_stack[ply - 2];
@@ -568,6 +688,7 @@ impl<'a> Worker<'a> {
             {
                 let r = 3 + depth / 4 + ((eval - beta) / 200).min(3);
                 let child = p.make_null();
+                self.acc_push(p, Move::NONE, ply);
                 self.push(ply, Move::NONE, NO_PIECE, child.key);
                 let score = -self.negamax(
                     &child,
@@ -664,6 +785,7 @@ impl<'a> Worker<'a> {
 
             let child = p.make(m);
             let piece = p.piece_at(m.from());
+            self.acc_push(p, m, ply);
             self.push(ply, m, piece, child.key);
             let new_depth = depth - 1 + ext;
             let mut score;
@@ -851,6 +973,7 @@ pub fn think(
             let clock = &clock;
             scope.spawn(move || {
                 let mut w = Worker::new(id, shared, clock, limits, history_keys);
+                w.acc_root(root);
                 let mut depth = 1 + (id as i32 % 2);
                 while depth <= max_depth && !w.stopped {
                     w.negamax(root, -INF, INF, depth, 0, false, Move::NONE);
@@ -861,6 +984,7 @@ pub fn think(
         }
 
         let mut w = Worker::new(0, &shared, &clock, limits, history_keys);
+        w.acc_root(root);
         let mut score = 0;
         let mut stable = 0;
         let mut last_best = Move::NONE;
@@ -967,4 +1091,66 @@ pub fn think(
     });
     shared.stop.store(false, Ordering::Relaxed);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Накопичувачі, оновлені ходами, збігаються з перерахованими з нуля (усі види ходів).
+    #[test]
+    fn incremental_accumulator() {
+        crate::bitboard::init();
+        let net: &'static Network = Box::leak(Box::new(test_net()));
+        let shared = Shared::new(1, 1).with_net(Some(net));
+        let limits = Limits::default();
+        let clock = Clock::new(&shared, &limits, WHITE, 0);
+        let mut w = Worker::new(0, &shared, &clock, &limits, &[]);
+        let mut seed = 77u64;
+        for fen in [
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
+            "8/8/8/KPp4r/8/8/8/7k w - c6 0 2",
+            "bqnb1rkr/pp3ppp/3ppn2/2p5/5P2/P2P4/NPP1P1PP/BQ1BNRKR w HFhf - 2 9",
+        ] {
+            let mut p = Position::from_fen(fen).unwrap();
+            w.acc_root(&p);
+            for ply in 0..40 {
+                let moves = p.legal_moves();
+                if moves.len == 0 {
+                    break;
+                }
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let m = moves.moves[(seed % moves.len as u64) as usize];
+                w.acc_push(&p, m, ply);
+                p = p.make(m);
+                assert_eq!(
+                    w.static_eval(&p, ply + 1),
+                    net.evaluate(&p) * (200 - p.halfmove.min(100) as i32) / 200,
+                    "{}",
+                    p.fen()
+                );
+            }
+        }
+    }
+
+    fn test_net() -> Network {
+        let h = 16;
+        let mut s = 5u64;
+        let mut r = |k: i32| {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            ((s % (2 * k as u64 + 1)) as i32 - k) as i16
+        };
+        Network {
+            hidden: h,
+            w1: (0..crate::nnue::INPUTS * h).map(|_| r(60)).collect(),
+            b1: (0..h).map(|_| r(60)).collect(),
+            w2: (0..2 * h).map(|_| r(60)).collect(),
+            b2: 100,
+        }
+    }
 }

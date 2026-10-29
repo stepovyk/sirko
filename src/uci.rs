@@ -1,5 +1,6 @@
 //! Протокол UCI: так із рушієм говорять lichess-bot, python-chess і будь-яка шахова програма.
 
+use crate::nnue::{self, Network};
 use crate::position::{Position, START_FEN};
 use crate::search::{think, Limits, Shared};
 use crate::types::*;
@@ -21,6 +22,7 @@ pub struct Engine {
     threads: usize,
     overhead: u64,
     chess960: bool,
+    net: Option<&'static Network>,
     search: Option<JoinHandle<()>>,
 }
 
@@ -33,10 +35,12 @@ impl Default for Engine {
 impl Engine {
     pub fn new() -> Engine {
         let pos = Position::startpos();
+        let net = nnue::embedded();
         Engine {
             keys: vec![pos.key],
             pos,
-            shared: Arc::new(Shared::new(DEFAULT_HASH, 1)),
+            shared: Arc::new(Shared::new(DEFAULT_HASH, 1).with_net(net)),
+            net,
             hash: DEFAULT_HASH,
             threads: 1,
             overhead: 30,
@@ -60,7 +64,7 @@ impl Engine {
 
     fn resize(&mut self) {
         self.stop();
-        self.shared = Arc::new(Shared::new(self.hash, self.threads));
+        self.shared = Arc::new(Shared::new(self.hash, self.threads).with_net(self.net));
     }
 
     fn set_position(&mut self, words: &[&str]) {
@@ -196,6 +200,26 @@ impl Engine {
                 self.chess960 = value.eq_ignore_ascii_case("true");
                 self.pos.chess960 |= self.chess960;
             }
+            "evalfile" => {
+                // Інша мережа без перезбирання (для перевірки нових мереж); «<internal>» – вбудована.
+                self.net = if value.is_empty() || value == "<internal>" {
+                    nnue::embedded()
+                } else if value == "<hce>" {
+                    None
+                } else {
+                    match std::fs::read(value)
+                        .map_err(|e| e.to_string())
+                        .and_then(|b| Network::from_bytes(&b))
+                    {
+                        Ok(n) => Some(Box::leak(Box::new(n))),
+                        Err(e) => {
+                            println!("info string мережу {value} не завантажено: {e}");
+                            self.net
+                        }
+                    }
+                };
+                self.resize();
+            }
             "clear hash" => {
                 self.stop();
                 self.shared.tt.clear();
@@ -216,6 +240,7 @@ impl Engine {
                 println!("option name Ponder type check default false");
                 println!("option name UCI_Chess960 type check default false");
                 println!("option name Clear Hash type button");
+                println!("option name EvalFile type string default <internal>");
                 println!("uciok");
             }
             Some("isready") => println!("readyok"),

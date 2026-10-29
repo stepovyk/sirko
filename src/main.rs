@@ -43,7 +43,7 @@ fn main() {
             let t = std::time::Instant::now();
             for fen in BENCH {
                 let p = Position::from_fen(fen).expect("FEN");
-                let shared = Arc::new(Shared::new(16, 1));
+                let shared = Arc::new(Shared::new(16, 1).with_net(sirko::nnue::embedded()));
                 let limits = Limits {
                     depth: Some(depth),
                     ..Limits::default()
@@ -56,6 +56,46 @@ fn main() {
                 "{nodes} вузлів за {s:.2} с ({:.0} тис./с)",
                 nodes as f64 / s / 1e3
             );
+        }
+        Some("datagen") => {
+            // datagen ПАРТІЙ ВУЗЛІВ_НА_ХІД ПОТОКІВ ФАЙЛ
+            let num = |i: usize, d: u64| args.get(i).and_then(|v| v.parse().ok()).unwrap_or(d);
+            sirko::datagen::run(sirko::datagen::Options {
+                games: num(2, 1000),
+                nodes: num(3, 5000),
+                threads: num(4, 1) as usize,
+                out: args.get(5).cloned().unwrap_or_else(|| "data.bin".into()),
+                random_plies: 8,
+            });
+        }
+        Some("train") => {
+            // train ВИХІД ПРИХОВАНИХ ЕПОХ [--batch=N --lr=X --wdl=X] ДАНІ...
+            let num = |i: usize, d: usize| args.get(i).and_then(|v| v.parse().ok()).unwrap_or(d);
+            let flag = |name: &str, d: f64| {
+                args.iter()
+                    .find_map(|a| {
+                        a.strip_prefix(&format!("--{name}="))
+                            .and_then(|v| v.parse().ok())
+                    })
+                    .unwrap_or(d)
+            };
+            sirko::train::run(sirko::train::Options {
+                out: args.get(2).cloned().unwrap_or_else(|| "sirko.nnue".into()),
+                hidden: num(3, 256),
+                epochs: num(4, 10),
+                data: args
+                    .iter()
+                    .skip(5)
+                    .filter(|a| !a.starts_with("--"))
+                    .cloned()
+                    .collect(),
+                batch: flag("batch", 16384.0) as usize,
+                lr: flag("lr", 0.001) as f32,
+                wdl: flag("wdl", 0.4) as f32,
+                threads: std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(1),
+            });
         }
         Some("moves") => {
             // Для звірки з python-chess: на кожен FEN зі stdin – «хід FEN-після» для кожного легального ходу.
