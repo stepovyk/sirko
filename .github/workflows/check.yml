@@ -1,0 +1,46 @@
+name: Перевірка
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+          pip install --break-system-packages chess==1.11.2
+      - name: Тести й лінтер
+        run: |
+          cargo fmt --check
+          cargo clippy --release --all-targets -- -D warnings
+          cargo test --release
+      - name: Perft, генерація ходів, UCI і замір
+        run: |
+          cargo build --release
+          test "$(./target/release/sirko perft 6 | cut -d' ' -f1)" = 119060324
+          python3 tools/movegen_check.py ./target/release/sirko 400
+          python3 tools/uci_check.py ./target/release/sirko
+          ./target/release/sirko bench
+      - name: Збирання cargo з Ubuntu 24.04 (як на сервері)
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          rustup toolchain install 1.75 --profile minimal
+          cargo +1.75 build --release
