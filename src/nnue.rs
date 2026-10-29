@@ -152,12 +152,22 @@ impl Network {
         let mut sum: i64 = 0;
         for (side, acc) in [us, them].into_iter().enumerate() {
             let w = &w2[side * h..(side + 1) * h];
-            let mut part: i64 = 0;
-            for (&v, &wt) in acc.iter().zip(w) {
-                let c = (v as i32).clamp(0, QA);
-                part += (c * wt as i32) as i64 * c as i64;
+            // Блоками по 16: кожен добуток не більший за 255·255·127, тож блок вміщається в i32,
+            // і компілятор рахує його векторно.
+            let mut blocks = acc.chunks_exact(16).zip(w.chunks_exact(16));
+            for (cv, cw) in &mut blocks {
+                let mut lane: i32 = 0;
+                for k in 0..16 {
+                    let c = (cv[k] as i32).clamp(0, QA);
+                    lane += c * cw[k] as i32 * c;
+                }
+                sum += lane as i64;
             }
-            sum += part;
+            let tail = h - h % 16;
+            for (&v, &wt) in acc[tail..].iter().zip(&w[tail..]) {
+                let c = (v as i32).clamp(0, QA);
+                sum += (c * wt as i32) as i64 * c as i64;
+            }
         }
         let out = sum / QA as i64 + self.b2[b] as i64;
         (out * SCALE as i64 / (QA as i64 * QB as i64)) as i32
