@@ -106,7 +106,20 @@ def main():
     reasons = {}
     pgn_out = open(args.pgn, "w") if args.pgn else None
     for g in range(args.games):
-        opening = openings[(g // 2) % len(openings)]
+        # Дебют з набору плюс два випадкові ходи (однакові для пари партій зі зміною кольорів):
+        # так дебюти не повторюються навіть у тисячах партій.
+        pair = random.Random(f"{args.seed}-{g // 2}")
+        base_line = openings[(g // 2) % len(openings)]
+        b0 = chess.Board()
+        for u in base_line.split():
+            b0.push_uci(u)
+        extra = []
+        for _ in range(2):
+            moves = sorted(m.uci() for m in b0.legal_moves)
+            mv = moves[pair.randrange(len(moves))]
+            b0.push_uci(mv)
+            extra.append(mv)
+        opening = " ".join([base_line, *extra])
         a_white = g % 2 == 0
         white, black = (a, b) if a_white else (b, a)
         result, why, board = play(white, black, opening, base, inc, g)
