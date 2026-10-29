@@ -1,0 +1,572 @@
+#!/usr/bin/env bash
+# SirkoAI – бот Lichess на власному рушії Сірко. Встановлення, оновлення й керування на сервері.
+# Довідка: sirko-bot help
+#
+# Сірко ділить сервер з Характерником і бере його lichess-bot (лише на читання).
+# Безпека: збирання рушія й перевірки – від безправного користувача sirko; від root –
+# лише системні пакети, копіювання готових файлів і systemd.
+set -Eeuo pipefail
+umask 022
+
+readonly NAME="sirko"
+readonly TITLE="SirkoAI"
+readonly ROOT="/opt/${NAME}"
+readonly SRC="${ROOT}/src"
+readonly ENGINE="${ROOT}/engine"
+readonly BUILD="${ROOT}/build"
+readonly CONF="${ROOT}/config.yml"
+readonly ETC="/etc/${NAME}"
+readonly TOKEN_FILE="${ETC}/token.env"
+readonly USER_FILE="${ETC}/username"
+readonly DEPLOY_KEY="${ETC}/deploy_key"
+readonly STATE="/var/lib/${NAME}"
+readonly GAMES="${STATE}/games"
+readonly LAST_UPDATE="${STATE}/last-update"
+readonly LOCK="/run/${NAME}.lock"
+readonly LB="/opt/kharakternyk/lichess-bot"
+readonly UNITS=("${NAME}.service" "${NAME}-update.service" "${NAME}-update.timer")
+readonly REPO_SSH="git@github.com:stepovyk/sirko.git"
+readonly LICHESS="https://lichess.org"
+readonly TOKEN_LINK="${LICHESS}/account/oauth/token/create?scopes[]=bot:play&description=SirkoAI"
+readonly PERFT5=4865609
+
+ENGINE_NEW=0
+UNIT_NEW=0
+BOT_STOPPED=0
+PROBLEMS=()
+
+say()  { printf '%s\n' "$*"; }
+step() { printf '\n▸ %s\n' "$*"; }
+ok()   { printf '  ✓ %s\n' "$*"; }
+warn() { printf '  ! %s\n' "$*" >&2; PROBLEMS+=("$*"); }
+die()  { printf '  ✗ %s\n' "$*" >&2; exit 1; }
+
+readonly MAIN_PID=$$
+on_error() {
+  local code=$? line=$1
+  [[ ${BASHPID} == "${MAIN_PID}" ]] || exit "${code}"
+  printf '  ✗ Збій (рядок %s, код %s). Подробиці вище. Бот не зламано: можна просто запустити команду ще раз.\n' "$line" "$code" >&2
+  exit "$code"
+}
+trap 'on_error $LINENO' ERR
+
+TMPD=""
+on_exit() {
+  trap - ERR
+  # Зупинений нами бот запускається знову, що б не сталося посередині.
+  if ((BOT_STOPPED)); then systemctl start "${NAME}.service" 2>/dev/null || true; fi
+  if [[ -n ${TMPD} ]]; then rm -rf "${TMPD}"; fi
+}
+trap on_exit EXIT
+
+init_tmp() { [[ -n ${TMPD} ]] || TMPD=$(mktemp -d); }
+need_root() { [[ ${EUID} -eq 0 ]] || die "Потрібні права адміністратора: sudo ${SRC}/deploy/sirko-bot $*"; }
+
+take_lock() {
+  exec 9>"${LOCK}"
+  flock -n 9 && return 0
+  say "  Чекаю, поки закінчиться інша дія ${TITLE}…"
+  flock -w 3600 9 || die "Іде інша дія ${TITLE}. Спробуйте за кілька хвилин."
+}
+
+tty_read() {
+  local prompt=$1 secret=${2:-} reply
+  { : </dev/tty; } 2>/dev/null || die "Немає термінала для введення. Запустіть команду через ssh -t."
+  if [[ -n ${secret} ]]; then
+    read -r -s -p "${prompt}" reply </dev/tty
+    printf '\n' >/dev/tty
+  else
+    read -r -p "${prompt}" reply </dev/tty
+  fi
+  printf '%s' "${reply}"
+}
+
+json_field() {
+  python3 -I - "$1" "$2" <<'PY'
+import json, sys
+try:
+    v = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    sys.exit(2)
+for key in sys.argv[2].split("."):
+    v = v.get(key) if isinstance(v, dict) else None
+print("" if v is None else v)
+PY
+}
+
+as_sirko() (
+  # Команда від безправного користувача sirko з чистим оточенням (робоча тека – AS_CWD або /).
+  local keep=() var
+  for var in HTTPS_PROXY HTTP_PROXY NO_PROXY https_proxy http_proxy no_proxy SSL_CERT_FILE; do
+    if [[ -n ${!var:-} ]]; then keep+=("${var}=${!var}"); fi
+  done
+  cd "${AS_CWD:-/}" || return 1
+  setpriv --reuid="${NAME}" --regid="${NAME}" --init-groups --no-new-privs \
+    env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="${BUILD}/home" LANG=C.UTF-8 \
+    CARGO_HOME="${BUILD}/cargo" CARGO_TARGET_DIR="${BUILD}/target" PYTHONDONTWRITEBYTECODE=1 \
+    "${keep[@]}" "$@"
+)
+
+# ---------- Lichess ----------
+
+read_token() {
+  [[ -s ${TOKEN_FILE} ]] || return 1
+  local token
+  token=$(sed -n 's/^LICHESS_BOT_TOKEN=//p' "${TOKEN_FILE}" | head -n 1)
+  [[ -n ${token} ]] || return 1
+  printf '%s' "${token}"
+}
+
+lichess_call() {
+  # Ключ іде в curl через stdin: його не видно в списку процесів.
+  local token=$1 method=$2 path=$3 body=$4 headers=${5:-/dev/null}
+  printf 'Authorization: Bearer %s\n' "${token}" \
+    | curl -sS --max-time 30 -X "${method}" -H @- -D "${headers}" -o "${body}" -w '%{http_code}' "${LICHESS}${path}" || true
+}
+
+check_account() {
+  local token=$1 body headers code username title games scopes answer why
+  init_tmp
+  body="${TMPD}/account.json"; headers="${TMPD}/headers"
+  code=$(lichess_call "${token}" GET /api/account "${body}" "${headers}")
+  case ${code} in
+    200) ;;
+    401) die "Lichess не прийняв ключ. Створіть новий з дозволом «Play games with the bot API»." ;;
+    429) die "Lichess просить зачекати. Спробуйте за хвилину." ;;
+    000 | "") die "Немає зв'язку з Lichess." ;;
+    *) die "Lichess відповів помилкою ${code}. Спробуйте трохи згодом." ;;
+  esac
+  scopes=$(tr -d '\r' <"${headers}" | sed -n 's/^[Xx]-[Oo][Aa]uth-[Ss]copes: *//p')
+  username=$(json_field "${body}" username) || die "Lichess повернув незрозумілу відповідь."
+  title=$(json_field "${body}" title)
+  games=$(json_field "${body}" count.all)
+  [[ ${username} =~ ^[A-Za-z0-9_-]{2,30}$ ]] || die "Lichess повернув дивне ім'я акаунта."
+  [[ ${games} =~ ^[0-9]+$ ]] || games=0
+  [[ ${scopes} == *bot:play* ]] || die "У ключа немає дозволу «Play games with the bot API» (bot:play)."
+  if [[ ${username,,} == harakternyk ]]; then
+    die "Це ключ Характерника. Для Сірка потрібен ключ його власного акаунта."
+  fi
+  if [[ ${title} != BOT ]]; then
+    ((games == 0)) || die "Акаунт ${username} уже зіграв ${games} партій, а ботом стає лише новий акаунт без партій."
+    say "  Акаунт ${username} стане шаховим ботом. Це назавжди: грати ним самому вже не вийде."
+    answer=$(tty_read "  Перетворити ${username} на бота? Введіть «так»: ")
+    answer=${answer,,}
+    [[ ${answer} == "так" || ${answer} == "y" || ${answer} == "yes" ]] || die "Скасовано. Нічого не змінено."
+    code=$(lichess_call "${token}" POST /api/bot/account/upgrade "${body}")
+    if [[ ${code} != 200 ]]; then
+      why=$(json_field "${body}" error) || why=""
+      die "Lichess не зробив акаунт ботом (код ${code}): ${why:-без пояснення}."
+    fi
+    ok "Акаунт ${username} тепер бот"
+  else
+    ok "Акаунт ${username} – бот"
+  fi
+  install -d -m 755 "${ETC}"
+  printf '%s\n' "${username}" >"${USER_FILE}"
+}
+
+ask_token() {
+  local token
+  say "  Потрібен ключ Lichess акаунта SirkoAI з дозволом «Play games with the bot API»."
+  say "  Створити, увійшовши на Lichess як SirkoAI: ${TOKEN_LINK}"
+  token=$(tty_read "  Вставте ключ (символи не показуються): " secret)
+  token=${token//[[:space:]]/}
+  [[ -n ${token} ]] || die "Ключ порожній."
+  [[ ${token} =~ ^[A-Za-z0-9_]+$ ]] || die "Ключ має дивні символи. Скопіюйте його ще раз повністю."
+  check_account "${token}"
+  install -d -m 755 "${ETC}"
+  ( umask 077; printf 'LICHESS_BOT_TOKEN=%s\n' "${token}" >"${TOKEN_FILE}.new" )
+  mv -f "${TOKEN_FILE}.new" "${TOKEN_FILE}"
+  ok "Ключ збережено лише на сервері (${TOKEN_FILE})"
+}
+
+ensure_token() {
+  step "Акаунт Lichess"
+  local token
+  if token=$(read_token); then check_account "${token}"; else ask_token; fi
+}
+
+# ---------- Система ----------
+
+ensure_packages() {
+  step "Системні пакети"
+  local pkgs=(git curl ca-certificates openssh-client build-essential cargo rustc python3 python3-yaml util-linux) missing=() p
+  for p in "${pkgs[@]}"; do
+    dpkg-query -W -f='${Status}' "${p}" 2>/dev/null | grep -q 'install ok installed' || missing+=("${p}")
+  done
+  if ((${#missing[@]})); then
+    export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1
+    apt-get -o DPkg::Lock::Timeout=600 update -qq
+    apt-get -o DPkg::Lock::Timeout=600 install -y -qq --no-install-recommends "${missing[@]}" >/dev/null
+    ok "Встановлено: ${missing[*]}"
+  else
+    ok "Усе вже є"
+  fi
+}
+
+ensure_user() {
+  if ! id -u "${NAME}" >/dev/null 2>&1; then
+    useradd --system --user-group --home-dir "${ROOT}" --no-create-home --shell /usr/sbin/nologin "${NAME}"
+    ok "Створено системного користувача ${NAME} без прав адміністратора"
+  fi
+  install -d -m 755 "${ROOT}" "${ENGINE}"
+}
+
+need_lichess_bot() {
+  [[ -x ${LB}/venv/bin/python && -f ${LB}/lichess-bot.py ]] \
+    || die "Немає lichess-bot Характерника (${LB}). Сірко грає через нього: спершу встановіть Характерника."
+}
+
+# ---------- Код і рушій ----------
+
+src_git() {
+  GIT_SSH_COMMAND="ssh -i ${DEPLOY_KEY} -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=20 \
+-o StrictHostKeyChecking=yes -o UserKnownHostsFile=${SRC}/deploy/github_known_hosts" git -C "${SRC}" "$@"
+}
+
+self_update() {
+  # self_update [--auto]: людина ставить свіжий main, нічний таймер – гілку release (перевірену CI).
+  local branch=main before after
+  [[ ${1:-} == --auto ]] && branch=release
+  before=$(git -C "${SRC}" rev-parse HEAD)
+  if ! src_git fetch -q "${REPO_SSH}" "${branch}" 2>/dev/null; then
+    if [[ ${branch} == release ]]; then
+      say "  Перевіреної версії Сірка ще немає, лишаю поточну"
+    else
+      warn "Немає доступу до коду Сірка на GitHub: додайте ключ сервера в stepovyk/sirko → Settings → Deploy keys: $(cat "${DEPLOY_KEY}.pub" 2>/dev/null)"
+    fi
+    return 0
+  fi
+  after=$(git -C "${SRC}" rev-parse FETCH_HEAD)
+  [[ ${before} == "${after}" ]] && return 0
+  if [[ ${branch} == release ]] && git -C "${SRC}" merge-base --is-ancestor "${after}" "${before}" 2>/dev/null; then
+    return 0  # стоїть новіша версія, поставлена людиною
+  fi
+  if ! git -C "${SRC}" show FETCH_HEAD:deploy/sirko-bot | bash -n; then
+    warn "Нова версія на GitHub пошкоджена, лишаю поточну"
+    return 0
+  fi
+  git -C "${SRC}" reset -q --hard FETCH_HEAD
+  ok "Код Сірка оновлено: $(git -C "${SRC}" log -1 --format='%h %s')"
+}
+
+build_engine() {
+  # Збирає рушій з поточного коду, якщо ще не зібраний (ENGINE_NEW=1), і перевіряє його до заміни.
+  step "Рушій Сірко"
+  local rev
+  rev=$(git -C "${SRC}" rev-parse HEAD)
+  if [[ -x ${ENGINE}/sirko && $(cat "${ENGINE}/VERSION" 2>/dev/null) == "${rev}" ]]; then
+    ok "Сірко $(git -C "${SRC}" log -1 --format=%h) – вже зібраний"
+    return 0
+  fi
+  rm -rf "${BUILD}"
+  install -d -m 755 -o "${NAME}" -g "${NAME}" "${BUILD}" "${BUILD}/home" "${BUILD}/src"
+  cp -r "${SRC}/." "${BUILD}/src/"
+  rm -rf "${BUILD}/src/.git"
+  chown -R "${NAME}:${NAME}" "${BUILD}/src"
+  say "  Збираю (кілька хвилин)…"
+  if ! AS_CWD="${BUILD}/src" as_sirko nice -n 19 timeout 60m cargo build --release --offline -q >"${BUILD}/build.log" 2>&1; then
+    tail -n 20 "${BUILD}/build.log" >&2
+    [[ -x ${ENGINE}/sirko ]] || die "Сірко не зібрався."
+    warn "Нова версія Сірка не зібралася, лишаю поточну"
+    return 0
+  fi
+  local bin="${BUILD}/target/release/sirko" got
+  got=$(as_sirko "${bin}" perft 5 | cut -d' ' -f1)
+  if [[ ${got} != "${PERFT5}" ]]; then
+    [[ -x ${ENGINE}/sirko ]] || die "Сірко зібрався, але рахує ходи неправильно (perft ${got})."
+    warn "Нова версія Сірка рахує ходи неправильно (perft ${got}), лишаю поточну"
+    return 0
+  fi
+  if ! AS_CWD="${BUILD}" as_sirko timeout 10m "${LB}/venv/bin/python" "${BUILD}/src/tools/uci_check.py" "${bin}" >"${BUILD}/uci.log" 2>&1; then
+    tail -n 15 "${BUILD}/uci.log" >&2
+    [[ -x ${ENGINE}/sirko ]] || die "Сірко зібрався, але не пройшов перевірку UCI."
+    warn "Нова версія Сірка не пройшла перевірку UCI, лишаю поточну"
+    return 0
+  fi
+  install -m 755 "${bin}" "${ENGINE}/sirko.new"
+  printf '%s\n' "${rev}" >"${ENGINE}/VERSION.new"
+  rm -rf "${BUILD}"
+  ENGINE_NEW=1
+  ok "Сірко $(git -C "${SRC}" log -1 --format=%h) зібрано й перевірено (perft, мати, ponder, шахи Фішера)"
+}
+
+render_config() {
+  local out=$1 cores mem_mb threads hash
+  cores=$(nproc)
+  mem_mb=$(awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo)
+  threads=${cores}
+  # Пам'ять: Характернику – більшість; Сірку – восьма частина, не більше 2 ГБ.
+  hash=$((mem_mb / 8 / 64 * 64))
+  if ((hash < 64)); then hash=64; fi
+  if ((hash > 2048)); then hash=2048; fi
+  python3 -I - "${SRC}/deploy/config.yml" "${out}" "${threads}" "${hash}" "${GAMES}" <<'PY'
+import sys, yaml
+src, dst, threads, hash_mb, games = sys.argv[1:]
+with open(src, encoding="utf-8") as f:
+    cfg = yaml.safe_load(f)
+cfg["engine"]["uci_options"]["Threads"] = int(threads)
+cfg["engine"]["uci_options"]["Hash"] = int(hash_mb)
+cfg["pgn_directory"] = games
+cfg["pgn_file_grouping"] = "game"
+with open(dst, "w", encoding="utf-8") as f:
+    f.write("# Створено sirko-bot з deploy/config.yml. Зміни вносити в репозиторій, не сюди.\n")
+    yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False, width=1000)
+PY
+  chmod 644 "${out}"
+}
+
+validate_config() {
+  # Налаштування перевіряє сам lichess-bot від імені sirko (рушій – новий, якщо щойно зібраний).
+  local file=$1 engine_name=$2 out token
+  token=$(read_token) || die "Ключа Lichess немає: sudo ${SRC}/deploy/sirko-bot token"
+  if ! out=$(printf '%s' "${token}" | AS_CWD="${LB}" as_sirko "${LB}/venv/bin/python" -c '
+import os, sys, tempfile, yaml
+os.environ["LICHESS_BOT_TOKEN"] = sys.stdin.read().strip()
+from lib.config import load_config
+from lib import engine_wrapper
+with open(sys.argv[1], encoding="utf-8") as f:
+    raw = yaml.safe_load(f)
+raw["engine"]["name"] = sys.argv[2]
+raw["engine"]["uci_options"].update({"Hash": 16, "Threads": 1})
+with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False, encoding="utf-8") as tmp:
+    yaml.safe_dump(raw, tmp, allow_unicode=True)
+try:
+    config = load_config(tmp.name)
+    with engine_wrapper.create_engine(config):
+        pass
+finally:
+    os.unlink(tmp.name)' "${file}" "${engine_name}" 2>&1); then
+    printf '%s\n' "${out}" | tail -n 15 >&2
+    return 1
+  fi
+}
+
+install_units() {
+  local unit dirty=0
+  for unit in "${UNITS[@]}"; do
+    if ! cmp -s "${SRC}/deploy/systemd/${unit}" "/etc/systemd/system/${unit}"; then
+      install -m 644 "${SRC}/deploy/systemd/${unit}" "/etc/systemd/system/${unit}"
+      dirty=1
+      [[ ${unit} == "${NAME}.service" ]] && UNIT_NEW=1
+    fi
+  done
+  # Та сама мережева заборона, що й у Характерника (службова адреса Oracle й локальні порти).
+  local src_drop="/etc/systemd/system/kharakternyk.service.d/network.conf" dst_dir="/etc/systemd/system/${NAME}.service.d"
+  if [[ -e ${src_drop} ]] && ! cmp -s "${src_drop}" "${dst_dir}/network.conf"; then
+    install -d -m 755 "${dst_dir}"
+    install -m 644 "${src_drop}" "${dst_dir}/network.conf"
+    dirty=1; UNIT_NEW=1
+  elif [[ ! -e ${src_drop} && -e ${dst_dir}/network.conf ]]; then
+    rm -f "${dst_dir}/network.conf"
+    dirty=1; UNIT_NEW=1
+  fi
+  ln -sfn "${SRC}/deploy/sirko-bot" "/usr/local/bin/sirko-bot"
+  if ((dirty)); then systemctl daemon-reload; fi
+  systemctl enable -q "${NAME}.service" "${NAME}-update.timer"
+  if ((dirty)); then systemctl restart "${NAME}-update.timer"; else systemctl start "${NAME}-update.timer"; fi
+}
+
+wait_online() {
+  local since=$1 i out
+  for ((i = 0; i < 100; i++)); do
+    out=$(journalctl -u "${NAME}.service" --since "${since}" -o cat --no-pager 2>/dev/null || true)
+    [[ ${out} == *"now connected to"* ]] && return 0
+    sleep 3
+  done
+  return 1
+}
+
+deploy() {
+  # Спільне для встановлення й оновлення: усе готується й перевіряється наперед.
+  local restart=0
+  need_lichess_bot
+  build_engine
+  step "Налаштування"
+  render_config "${CONF}.new"
+  local engine_name=sirko
+  ((ENGINE_NEW)) && engine_name=sirko.new
+  if ! validate_config "${CONF}.new" "${engine_name}"; then
+    rm -f "${CONF}.new" "${ENGINE}/sirko.new" "${ENGINE}/VERSION.new"
+    die "lichess-bot не прийняв налаштування. Бот працює як раніше."
+  fi
+  ok "lichess-bot прийняв налаштування (потоків: $(sed -n 's/^ *Threads: *//p' "${CONF}.new"), пам'яті: $(sed -n 's/^ *Hash: *//p' "${CONF}.new") МБ)"
+  cmp -s "${CONF}.new" "${CONF}" || restart=1
+  ((ENGINE_NEW)) && restart=1
+  step "Запуск"
+  install_units
+  ((UNIT_NEW)) && restart=1
+  systemctl is-active -q "${NAME}.service" || restart=1
+  if ((restart == 0)); then
+    rm -f "${CONF}.new"
+    ok "Змін немає, бот грає далі без перерви"
+    return 0
+  fi
+  if systemctl is-active -q "${NAME}.service"; then
+    say "  Чекаю, поки бот дограє партію, і зупиняю…"
+  fi
+  BOT_STOPPED=1
+  systemctl stop "${NAME}.service"
+  if ((ENGINE_NEW)); then
+    [[ -x ${ENGINE}/sirko ]] && cp -f "${ENGINE}/sirko" "${ENGINE}/sirko.prev"
+    mv -f "${ENGINE}/sirko.new" "${ENGINE}/sirko"
+    mv -f "${ENGINE}/VERSION.new" "${ENGINE}/VERSION"
+  fi
+  mv -f "${CONF}.new" "${CONF}"
+  local since
+  since=$(date '+%Y-%m-%d %H:%M:%S')
+  systemctl start "${NAME}.service"
+  BOT_STOPPED=0
+  if wait_online "${since}"; then
+    ok "${TITLE} підключився до Lichess і грає"
+  elif [[ -x ${ENGINE}/sirko.prev ]]; then
+    warn "Нова версія не підключилася, повертаю попередню"
+    systemctl stop "${NAME}.service" || true
+    mv -f "${ENGINE}/sirko.prev" "${ENGINE}/sirko"
+    rm -f "${ENGINE}/VERSION"
+    systemctl start "${NAME}.service"
+    die "Нова версія не запрацювала, повернув попередню. Подробиці: sirko-bot log"
+  else
+    die "Бот не підключився до Lichess. Перевірте ключ і мережу: sirko-bot log"
+  fi
+  rm -f "${ENGINE}/sirko.prev"
+}
+
+record_update() {
+  install -d -m 755 "${STATE}"
+  {
+    printf '%s\n' "$(date '+%d.%m.%Y %H:%M') – $1"
+    local p
+    for p in "${PROBLEMS[@]}"; do printf '  ! %s\n' "${p}"; done
+  } >"${LAST_UPDATE}"
+}
+
+# ---------- Команди ----------
+
+cmd_install() {
+  need_root install
+  take_lock
+  [[ -d ${SRC}/.git ]] || die "Немає коду Сірка в ${SRC}. Встановлення – за кроками з README."
+  say "${TITLE} – встановлення"
+  ensure_packages
+  ensure_user
+  ensure_token
+  deploy
+  record_update "встановлено"
+  cmd_status
+}
+
+cmd_update() {
+  need_root update
+  take_lock
+  say "${TITLE} – оновлення"
+  ensure_packages
+  step "Код Сірка"
+  self_update "${1:-}"
+  ensure_user
+  deploy
+  record_update "оновлено"
+}
+
+cmd_token() {
+  need_root token
+  take_lock
+  ask_token
+  systemctl restart "${NAME}.service" && ok "Бот перезапущено з новим ключем"
+}
+
+cmd_ensure_running() {
+  need_root ensure-running
+  systemctl is-active -q "${NAME}.service" || systemctl start "${NAME}.service"
+}
+
+cmd_status() {
+  local active version user body
+  active=$(systemctl show -p ActiveState --value "${NAME}.service" 2>/dev/null || echo unknown)
+  version=$(git -C "${SRC}" log -1 --format='%h %cd' --date=format:'%d.%m.%Y' 2>/dev/null || echo "?")
+  user=$(cat "${USER_FILE}" 2>/dev/null || true)
+  say ""
+  say "  ${TITLE}"
+  say "  Стан:      $([[ ${active} == active ]] && echo працює || echo "${active}")"
+  say "  Рушій:     Сірко ${version}"
+  [[ -s ${LAST_UPDATE} ]] && say "  Оновлення: $(head -n 1 "${LAST_UPDATE}")"
+  [[ ${user} =~ ^[A-Za-z0-9_-]{2,30}$ ]] || return 0
+  say "  Профіль:   ${LICHESS}/@/${user}"
+  init_tmp
+  body="${TMPD}/user.json"
+  if curl -fsS --max-time 20 -o "${body}" "${LICHESS}/api/user/${user}"; then
+    python3 -I - "${body}" <<'PY' || true
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+perfs = d.get("perfs") or {}
+names = {"bullet": "куля", "blitz": "бліц", "rapid": "рапід", "classical": "класика", "chess960": "Фішера"}
+parts = [f"{n} {perfs[k]['rating']}{'?' if perfs[k].get('prov') else ''}" for k, n in names.items() if perfs.get(k, {}).get("games")]
+c = d.get("count") or {}
+print("  Рейтинг:   " + (", ".join(parts) or "ще без рейтингових партій"))
+print(f"  Партії:    {c.get('all', 0)} – виграно {c.get('win', 0)}, нічиїх {c.get('draw', 0)}, програно {c.get('loss', 0)}")
+PY
+  fi
+}
+
+cmd_log() {
+  case ${1:-} in
+    update) journalctl -u "${NAME}-update.service" -n 200 --no-pager -o cat ;;
+    -f) journalctl -u "${NAME}.service" -f -o cat ;;
+    *) journalctl -u "${NAME}.service" -n 200 --no-pager -o cat ;;
+  esac
+}
+
+cmd_uninstall() {
+  need_root uninstall
+  take_lock
+  local answer unit
+  answer=$(tty_read "  Видалити ${TITLE} з сервера (акаунт на Lichess лишиться ботом)? Введіть «так»: ")
+  [[ ${answer,,} == "так" || ${answer,,} == "yes" ]] || die "Скасовано."
+  systemctl disable -q --now "${NAME}-update.timer" 2>/dev/null || true
+  systemctl stop "${NAME}.service" 2>/dev/null || true
+  systemctl disable -q "${NAME}.service" 2>/dev/null || true
+  for unit in "${UNITS[@]}"; do rm -f "/etc/systemd/system/${unit}"; done
+  rm -rf "/etc/systemd/system/${NAME}.service.d"
+  systemctl daemon-reload
+  rm -f /usr/local/bin/sirko-bot
+  rm -rf "${ROOT}" "${ETC}" "${STATE}"
+  userdel "${NAME}" 2>/dev/null || warn "Не вдалося видалити користувача ${NAME}"
+  ok "${TITLE} видалено з сервера"
+}
+
+usage() {
+  cat <<EOF
+${TITLE} – бот Lichess на власному рушії Сірко
+
+  sirko-bot status            стан, рейтинг і партії
+  sirko-bot log [-f|update]   журнал гри (-f – наживо) чи оновлень
+  sudo sirko-bot update       оновити до свіжого коду зараз (саме – щоночі, з перевіреної гілки)
+  sudo sirko-bot restart      перезапустити (спершу дограє партію)
+  sudo sirko-bot stop|start   зупинити чи запустити
+  sudo sirko-bot token        замінити ключ Lichess
+  sudo sirko-bot uninstall    видалити з сервера
+EOF
+}
+
+main() {
+  local cmd=${1:-help}
+  shift || true
+  case ${cmd} in
+    install) cmd_install ;;
+    update) cmd_update "${1:-}" ;;
+    status) cmd_status ;;
+    log) cmd_log "${1:-}" ;;
+    start) need_root start; systemctl start "${NAME}.service" && ok "Запущено" ;;
+    stop) need_root stop; say "  Чекаю, поки бот дограє партію…"; systemctl stop "${NAME}.service" && ok "Зупинено" ;;
+    restart) need_root restart; systemctl restart "${NAME}.service" && ok "Перезапущено" ;;
+    token) cmd_token ;;
+    ensure-running) cmd_ensure_running ;;
+    uninstall) cmd_uninstall ;;
+    help | -h | --help) usage ;;
+    *) usage; exit 2 ;;
+  esac
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
+fi

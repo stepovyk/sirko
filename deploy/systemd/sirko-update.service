@@ -1,0 +1,20 @@
+[Unit]
+Description=SirkoAI – нічне оновлення Сірка
+After=network-online.target kharakternyk-update.service
+Wants=network-online.target
+StartLimitIntervalSec=1d
+StartLimitBurst=4
+
+[Service]
+Type=oneshot
+ExecStart=/opt/sirko/src/deploy/sirko-bot update --auto
+ExecStopPost=-/opt/sirko/src/deploy/sirko-bot ensure-running
+TimeoutStartSec=4h
+Restart=on-failure
+RestartSec=30min
+Nice=19
+CPUWeight=10
+IOWeight=10
+MemoryMax=2G
+ProtectHome=tmpfs
+PrivateTmp=yes

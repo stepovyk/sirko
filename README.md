@@ -33,3 +33,24 @@ python3 tools/match.py --a ./target/release/sirko --b stockfish --b-opt UCI_Limi
 | Stockfish, Elo 2800 | 14,5 з 30 (+10 =9 −11) |
 
 Далі сили додадуть налаштування оцінки на власних партіях і власна нейромережа.
+
+## Бот SirkoAI
+
+Сірко грає на Lichess окремим ботом [SirkoAI](https://lichess.org/@/SirkoAI) на тому ж сервері, що й Характерник, і бере його lichess-bot. Грає лише сам рушій: ні баз дебютів, ні таблиць закінчень, ні хмарного аналізу. Коли грають обидва боти, процесор дістається головно Характернику.
+
+Встановлення на сервері з Характерником:
+
+1. Створіть ключ сервера для цього репозиторію й покажіть його:
+
+```bash
+sudo install -d -m 755 /etc/sirko && sudo ssh-keygen -q -t ed25519 -N "" -C sirko-server -f /etc/sirko/deploy_key && sudo cat /etc/sirko/deploy_key.pub
+```
+
+2. Додайте рядок на GitHub: репозиторій → Settings → Deploy keys → Add deploy key, без дозволу на запис.
+3. Завантажте код і встановіть (спитає ключ Lichess акаунта SirkoAI з дозволом «Play games with the bot API»):
+
+```bash
+sudo GIT_SSH_COMMAND="ssh -i /etc/sirko/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" git clone git@github.com:stepovyk/sirko.git /opt/sirko/src && sudo /opt/sirko/src/deploy/sirko-bot install
+```
+
+Далі сервер щоночі сам ставить нову версію з гілки `release`, куди CI переносить лише перевірені коміти. Керування: `sirko-bot help`.

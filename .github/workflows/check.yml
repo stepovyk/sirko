@@ -44,3 +44,35 @@ jobs:
         run: |
           rustup toolchain install 1.75 --profile minimal
           cargo +1.75 build --release
+
+  # Встановлення бота на чистій Ubuntu, як на сервері (системний cargo, systemd, lichess-bot).
+  deploy:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+      - name: Скрипт керування
+        run: shellcheck -x deploy/sirko-bot tests/deploy_check.sh
+      - name: Встановлення
+        run: |
+          # Системний cargo з Ubuntu, а не rustup раннера: так само, як на сервері.
+          sudo rm -f /usr/local/bin/cargo /usr/local/bin/rustc
+          sudo env PATH=/usr/sbin:/usr/bin:/sbin:/bin bash tests/deploy_check.sh
+
+  # Перевірена версія: нічне оновлення сервера бере лише цю гілку.
+  release:
+    needs: [check, deploy]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Перенести в release
+        run: |
+          if git fetch -q origin release 2>/dev/null && ! git merge-base --is-ancestor FETCH_HEAD HEAD; then
+            echo "::notice::release новіша за цей коміт, лишаю як є"
+            exit 0
+          fi
+          git push origin HEAD:refs/heads/release

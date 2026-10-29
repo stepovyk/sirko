@@ -1,0 +1,116 @@
+# Налаштування бота SirkoAI для lichess-bot. Ключ Lichess сюди не пишеться: служба бере його
+# зі змінної LICHESS_BOT_TOKEN (/etc/sirko/token.env). Threads і Hash sirko-bot підбирає під сервер.
+# Грає лише сам Сірко: ні баз дебютів, ні таблиць закінчень, ні хмарного аналізу.
+
+url: "https://lichess.org/"
+
+engine:
+  dir: "/opt/sirko/engine/"
+  name: "sirko"
+  protocol: "uci"
+  ponder: true
+  debug: false
+  silence_stderr: false
+  polyglot:
+    enabled: false
+  draw_or_resign:
+    resign_enabled: false           # не здається: суперник може помилитися
+    resign_score: -1000
+    resign_for_egtb_minus_two: false
+    resign_moves: 5
+    offer_draw_enabled: false
+    offer_draw_score: 0
+    offer_draw_for_egtb_zero: false
+    offer_draw_moves: 10
+    offer_draw_pieces: 10
+  online_moves:
+    max_out_of_book_moves: 0
+    max_retries: 0
+    chessdb_book:
+      enabled: false
+    lichess_cloud_analysis:
+      enabled: false
+    lichess_opening_explorer:
+      enabled: false
+    online_egtb:
+      enabled: false
+  lichess_bot_tbs:
+    syzygy:
+      enabled: false
+    gaviota:
+      enabled: false
+  homemade_options: {}
+  uci_options:
+    Threads: 2
+    Hash: 256
+    Move Overhead: 60
+
+abort_time: 30
+fake_think_time: false
+rate_limiting_delay: 0
+move_overhead: 500
+max_takebacks_accepted: 0
+quit_after_all_games_finish: true   # перед оновленням спершу дограє партію
+
+correspondence:
+  move_time: 120
+  checkin_period: 300
+  disconnect_time: 150
+  ponder: false
+
+challenge:
+  concurrency: 1                    # одна партія за раз: сервер ділить з Характерником
+  sort_by: "best"
+  preference: "none"
+  accept_bot: true
+  only_bot: false
+  max_increment: 30
+  min_increment: 0
+  max_base: 1800
+  min_base: 0
+  max_days: 14
+  min_days: 1
+  variants:                         # Сірко грає класичні шахи, шахи Фішера й з позиції
+    - standard
+    - chess960
+    - fromPosition
+  time_controls:
+    - bullet
+    - blitz
+    - rapid
+    - classical
+    - correspondence
+  modes:
+    - casual
+    - rated
+  bullet_requires_increment: false
+  max_simultaneous_games_per_user: 1
+
+greeting:
+  hello: "Привіт! Я {me}, шаховий рушій, написаний з нуля. Гарної гри! / Hi! I'm {me}, a chess engine written from scratch. Have a good game!"
+  goodbye: "Дякую за гру! / Thanks for the game!"
+  hello_spectators: "Вітаю глядачів! Я {me}. / Welcome! I'm {me}."
+  goodbye_spectators: "Дякую, що дивилися! / Thanks for watching!"
+
+matchmaking:                        # сам кличе ботів, коли без гри: нікого не уникає
+  allow_matchmaking: true
+  allow_during_games: false
+  challenge_variant: "standard"
+  challenge_timeout: 2
+  challenge_initial_time:
+    - 60
+    - 180
+    - 300
+    - 600
+  challenge_increment:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 5
+  opponent_min_rating: 0
+  opponent_max_rating: 4000
+  rating_preference: "none"
+  challenge_mode: "rated"
+  challenge_filter: "coarse"
+  include_challenge_block_list: false
