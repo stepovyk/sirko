@@ -175,6 +175,10 @@ struct Worker<'a> {
     killers: [[Move; 2]; MAX_PLY + 4],
     history: Box<[[[i32; 64]; 64]; 2]>,
     counter: Box<[[Move; 64]; 12]>,
+    /// Історія продовжень: [фігура й поле попереднього ходу][фігура й поле цього ходу] (для 1 і 2 ходів тому).
+    cont: Vec<i32>,
+    /// Історія взять: [фігура][поле][хто взятий].
+    capture_hist: Box<[[[i32; 6]; 64]; 12]>,
     stack_move: [Move; MAX_PLY + 4],
     stack_piece: [u8; MAX_PLY + 4],
     eval_stack: [i32; MAX_PLY + 4],
@@ -246,6 +250,8 @@ impl<'a> Worker<'a> {
             killers: [[Move::NONE; 2]; MAX_PLY + 4],
             history: Box::new([[[0; 64]; 64]; 2]),
             counter: Box::new([[Move::NONE; 64]; 12]),
+            cont: vec![0; 12 * 64 * 12 * 64],
+            capture_hist: Box::new([[[0; 6]; 64]; 12]),
             stack_move: [Move::NONE; MAX_PLY + 4],
             stack_piece: [NO_PIECE; MAX_PLY + 4],
             eval_stack: [0; MAX_PLY + 4],
@@ -452,7 +458,9 @@ impl<'a> Worker<'a> {
                     0
                 };
                 let attacker = kind_of(p.piece_at(m.from()));
-                let base = victim_value * 10 + promo - SEE_VALUE[attacker] / 10;
+                let hist = self.capture_hist[p.piece_at(m.from()) as usize][m.to() as usize]
+                    [Self::victim(p, m)];
+                let base = victim_value * 10 + promo - SEE_VALUE[attacker] / 10 + hist / 16;
                 if see_ge(p, m, -50) {
                     (1 << 28) + base
                 } else {
@@ -465,13 +473,66 @@ impl<'a> Worker<'a> {
             } else if m == countermove {
                 1 << 26
             } else {
-                self.history[p.side][m.from() as usize][m.to() as usize]
+                self.quiet_score(p, m, ply)
             };
         }
     }
 
     fn update_history(&mut self, side: usize, m: Move, bonus: i32) {
         let h = &mut self.history[side][m.from() as usize][m.to() as usize];
+        *h += bonus - *h * bonus.abs() / HISTORY_MAX;
+    }
+
+    /// Індекси історії продовжень для ходу (piece, to) щодо ходів 1 і 2 півходи тому.
+    #[inline(always)]
+    fn cont_slots(&self, ply: usize, piece: u8, to: Square) -> [Option<usize>; 2] {
+        let mut out = [None, None];
+        for (k, back) in [1usize, 2].into_iter().enumerate() {
+            if ply >= back {
+                let (pm, pp) = (self.stack_move[ply - back], self.stack_piece[ply - back]);
+                if !pm.is_none() && pp != NO_PIECE {
+                    out[k] = Some(
+                        ((pp as usize * 64 + pm.to() as usize) * 12 + piece as usize) * 64
+                            + to as usize,
+                    );
+                }
+            }
+        }
+        out
+    }
+
+    /// Уся історія тихого ходу: власна плюс продовження.
+    #[inline(always)]
+    fn quiet_score(&self, p: &Position, m: Move, ply: usize) -> i32 {
+        let piece = p.piece_at(m.from());
+        let mut v = self.history[p.side][m.from() as usize][m.to() as usize];
+        for i in self.cont_slots(ply, piece, m.to()).into_iter().flatten() {
+            v += self.cont[i];
+        }
+        v
+    }
+
+    fn update_quiet(&mut self, p: &Position, m: Move, ply: usize, bonus: i32) {
+        self.update_history(p.side, m, bonus);
+        let piece = p.piece_at(m.from());
+        for i in self.cont_slots(ply, piece, m.to()).into_iter().flatten() {
+            let h = &mut self.cont[i];
+            *h += bonus - *h * bonus.abs() / HISTORY_MAX;
+        }
+    }
+
+    #[inline(always)]
+    fn victim(p: &Position, m: Move) -> usize {
+        if m.is_ep() || !m.is_capture() {
+            PAWN
+        } else {
+            kind_of(p.piece_at(m.to()))
+        }
+    }
+
+    fn update_capture(&mut self, p: &Position, m: Move, bonus: i32) {
+        let h = &mut self.capture_hist[p.piece_at(m.from()) as usize][m.to() as usize]
+            [Self::victim(p, m)];
         *h += bonus - *h * bonus.abs() / HISTORY_MAX;
     }
 
@@ -745,6 +806,8 @@ impl<'a> Worker<'a> {
         let mut legal = 0;
         let mut quiets_tried: [Move; 64] = [Move::NONE; 64];
         let mut n_quiets = 0;
+        let mut captures_tried: [Move; 32] = [Move::NONE; 32];
+        let mut n_captures = 0;
         let lmr = lmr_table();
 
         for i in 0..list.len {
@@ -823,7 +886,7 @@ impl<'a> Worker<'a> {
                     r += !improving as i32;
                     r -= child.in_check() as i32;
                     if quiet {
-                        r -= self.history[p.side][m.from() as usize][m.to() as usize] / 6000;
+                        r -= self.quiet_score(p, m, ply) / 8000;
                     }
                     r -= tt_pv as i32;
                     r = r.clamp(0, new_depth - 1);
@@ -860,6 +923,9 @@ impl<'a> Worker<'a> {
             if quiet && n_quiets < 64 {
                 quiets_tried[n_quiets] = m;
                 n_quiets += 1;
+            } else if !quiet && n_captures < 32 {
+                captures_tried[n_captures] = m;
+                n_captures += 1;
             }
             if score > best {
                 best = score;
@@ -874,16 +940,25 @@ impl<'a> Worker<'a> {
                     }
                     self.pv_len[ply] = len + 1;
                     if score >= beta {
+                        let bonus = (depth * depth * 16).min(1600);
+                        // Взяття, що не дали відсічення, – гірші, ніж здавалося.
+                        for &c in &captures_tried[..n_captures] {
+                            if c != m {
+                                self.update_capture(p, c, -bonus);
+                            }
+                        }
+                        if !quiet {
+                            self.update_capture(p, m, bonus);
+                        }
                         if quiet {
                             if self.killers[ply][0] != m {
                                 self.killers[ply][1] = self.killers[ply][0];
                                 self.killers[ply][0] = m;
                             }
-                            let bonus = (depth * depth * 16).min(1600);
-                            self.update_history(p.side, m, bonus);
+                            self.update_quiet(p, m, ply, bonus);
                             for &q in &quiets_tried[..n_quiets] {
                                 if q != m {
-                                    self.update_history(p.side, q, -bonus);
+                                    self.update_quiet(p, q, ply, -bonus);
                                 }
                             }
                             if ply > 0
