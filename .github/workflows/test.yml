@@ -1,0 +1,87 @@
+name: Матч версій
+
+# Перевірка зміни: версія з гілки test проти версії з base, партії на 8 машинах паралельно.
+# У main іде лише зміна, що виграла.
+on:
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "Гілка чи коміт, що перевіряємо"
+        required: true
+      base:
+        description: "З чим порівнюємо"
+        default: "main"
+      games:
+        description: "Партій на кожну з 8 машин"
+        default: "100"
+      tc:
+        description: "Контроль часу (секунди+надбавка)"
+        default: "8+0.08"
+      options:
+        description: "Опції UCI для обох (через пробіл), напр. EvalFile=<hce>"
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  match:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Збирання обох версій
+        env:
+          TEST_REF: ${{ inputs.test }}
+          BASE_REF: ${{ inputs.base }}
+        run: |
+          pip install --break-system-packages chess==1.11.2
+          git worktree add -f ../test "origin/${TEST_REF}" 2>/dev/null || git worktree add -f ../test "${TEST_REF}"
+          git worktree add -f ../base "origin/${BASE_REF}" 2>/dev/null || git worktree add -f ../base "${BASE_REF}"
+          (cd ../test && cargo build --release -q)
+          (cd ../base && cargo build --release -q)
+      - name: Матч
+        env:
+          OPTS: ${{ inputs.options }}
+          GAMES: ${{ inputs.games }}
+          TC: ${{ inputs.tc }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          opts=()
+          for o in ${OPTS}; do opts+=(--a-opt "$o" --b-opt "$o"); done
+          python3 tools/match.py --a ../test/target/release/sirko --b ../base/target/release/sirko "${opts[@]}" \
+            --games "${GAMES}" --tc "${TC}" --seed "${SHARD}0" | tee match.txt
+          grep "^\[" match.txt | tail -n 1 >"result-${SHARD}.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ matrix.shard }}
+          path: result-${{ matrix.shard }}.txt
+
+  verdict:
+    needs: match
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          merge-multiple: true
+      - name: Підсумок
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import glob, math, re
+          w = d = l = 0
+          for f in glob.glob("result-*.txt"):
+              m = re.search(r"\+(\d+) =(\d+) -(\d+)", open(f).read())
+              if m:
+                  w += int(m[1]); d += int(m[2]); l += int(m[3])
+          n = w + d + l
+          p = (w + d / 2) / n
+          elo = -400 * math.log10(1 / p - 1) if 0 < p < 1 else float("nan")
+          err = 400 / math.log(10) * 1.96 * math.sqrt(p * (1 - p) / n) / (p * (1 - p)) if 0 < p < 1 else float("nan")
+          print(f"Перевірена версія проти базової: +{w} ={d} -{l}, Elo {elo:+.0f} ± {err:.0f} ({n} партій)")
+          PY

@@ -58,7 +58,7 @@ fn main() {
             );
         }
         Some("datagen") => {
-            // datagen ПАРТІЙ ВУЗЛІВ_НА_ХІД ПОТОКІВ ФАЙЛ
+            // datagen ПАРТІЙ ВУЗЛІВ_НА_ХІД ПОТОКІВ ФАЙЛ [ХВИЛИН]
             let num = |i: usize, d: u64| args.get(i).and_then(|v| v.parse().ok()).unwrap_or(d);
             sirko::datagen::run(sirko::datagen::Options {
                 games: num(2, 1000),
@@ -66,6 +66,7 @@ fn main() {
                 threads: num(4, 1) as usize,
                 out: args.get(5).cloned().unwrap_or_else(|| "data.bin".into()),
                 random_plies: 8,
+                seconds: num(6, 0) * 60,
             });
         }
         Some("train") => {

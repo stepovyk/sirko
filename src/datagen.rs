@@ -102,6 +102,8 @@ pub struct Options {
     pub threads: usize,
     pub out: String,
     pub random_plies: usize,
+    /// Нових партій після стількох секунд не починати (0 – без обмеження).
+    pub seconds: u64,
 }
 
 /// Одна партія: записи з результатом.
@@ -216,6 +218,9 @@ pub fn run(opt: Options) {
                 let shared = Arc::new(Shared::new(16, 1).with_net(crate::nnue::embedded()));
                 let mut last = Instant::now();
                 loop {
+                    if opt.seconds > 0 && start.elapsed().as_secs() >= opt.seconds {
+                        break;
+                    }
                     if games.fetch_add(1, Ordering::Relaxed) >= opt.games {
                         break;
                     }

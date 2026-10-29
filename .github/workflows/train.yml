@@ -1,0 +1,142 @@
+name: Навчання мережі
+
+# Самогра на багатьох машинах → навчання мережі → матч проти поточного Сірка.
+# Нова мережа не йде в рушій сама: її беру з артефактів, лише коли матч виграно.
+on:
+  workflow_dispatch:
+    inputs:
+      shards:
+        description: "Скільки машин генерують самогру"
+        default: "16"
+      minutes:
+        description: "Скільки хвилин самогри на машині"
+        default: "90"
+      nodes:
+        description: "Вузлів пошуку на хід у самогрі"
+        default: "5000"
+      hidden:
+        description: "Нейронів прихованого шару"
+        default: "256"
+      epochs:
+        description: "Епох навчання"
+        default: "12"
+      games:
+        description: "Партій матчу на кожну з 8 машин"
+        default: "50"
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      shards: ${{ steps.s.outputs.shards }}
+    steps:
+      - id: s
+        env:
+          SHARDS: ${{ inputs.shards }}
+        run: echo "shards=$(python3 -c 'import json,sys; print(json.dumps(list(range(min(20, int(sys.argv[1]))))))' "${SHARDS}")" >>"$GITHUB_OUTPUT"
+
+  selfplay:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v5
+      - name: Збирання
+        run: cargo build --release
+      - name: Самогра
+        env:
+          NODES: ${{ inputs.nodes }}
+          MINUTES: ${{ inputs.minutes }}
+          SHARD: ${{ matrix.shard }}
+        run: ./target/release/sirko datagen 1000000000 "${NODES}" "$(nproc)" "data-${SHARD}.bin" "${MINUTES}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: data-${{ matrix.shard }}
+          path: data-${{ matrix.shard }}.bin
+          retention-days: 7
+          compression-level: 1
+
+  train:
+    needs: selfplay
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: data-*
+          path: data
+          merge-multiple: true
+      - name: Збирання
+        run: cargo build --release
+      - name: Навчання
+        env:
+          HIDDEN: ${{ inputs.hidden }}
+          EPOCHS: ${{ inputs.epochs }}
+        run: |
+          ls -la data
+          ./target/release/sirko train sirko.nnue "${HIDDEN}" "${EPOCHS}" --batch=16384 --lr=0.001 --wdl=0.4 data/*.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: net
+          path: sirko.nnue
+          retention-days: 30
+
+  match:
+    needs: train
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: net
+      - name: Матч нової мережі проти поточного Сірка
+        env:
+          GAMES: ${{ inputs.games }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          pip install --break-system-packages chess==1.11.2
+          cargo build --release
+          python3 tools/match.py --a ./target/release/sirko --a-opt "EvalFile=$PWD/sirko.nnue" \
+            --b ./target/release/sirko --games "${GAMES}" --tc 8+0.08 --seed "${SHARD}" | tee match.txt
+          grep "^\[" match.txt | tail -n 1 >"result-${SHARD}.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ matrix.shard }}
+          path: result-${{ matrix.shard }}.txt
+
+  verdict:
+    needs: match
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          merge-multiple: true
+      - name: Підсумок
+        run: |
+          cat result-*.txt
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import glob, math, re
+          w = d = l = 0
+          for f in glob.glob("result-*.txt"):
+              m = re.search(r"\+(\d+) =(\d+) -(\d+)", open(f).read())
+              if m:
+                  w += int(m[1]); d += int(m[2]); l += int(m[3])
+          n = w + d + l
+          p = (w + d / 2) / n
+          elo = -400 * math.log10(1 / p - 1) if 0 < p < 1 else float("nan")
+          err = 400 / math.log(10) * 1.96 * math.sqrt(p * (1 - p) / n) / (p * (1 - p)) if 0 < p < 1 else float("nan")
+          print(f"Нова мережа проти поточного Сірка: +{w} ={d} -{l}, Elo {elo:+.0f} ± {err:.0f} ({n} партій)")
+          PY
