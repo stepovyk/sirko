@@ -11,6 +11,7 @@ import math
 import random
 import shlex
 import sys
+import time
 
 import chess
 import chess.engine
@@ -56,15 +57,17 @@ def play(white, black, opening, base, inc, game_no):
     while not board.is_game_over(claim_draw=True):
         side = 0 if board.turn == chess.WHITE else 1
         limit = chess.engine.Limit(white_clock=clock[0], black_clock=clock[1], white_inc=inc, black_inc=inc)
-        import time
         t = time.monotonic()
         try:
             res = engines[side].play(board, limit, game=game_no)
         except chess.engine.EngineError as err:
             return ("0-1" if side == 0 else "1-0"), f"рушій зламався: {err}", board
         used = time.monotonic() - t
+        before = clock[side]
         clock[side] -= used
         if clock[side] < 0:
+            print(f"  час: напівхід {board.ply() + 1}, на годиннику {before * 1000:.0f} мс, "
+                  f"витрачено {used * 1000:.0f} мс", flush=True)
             return ("0-1" if side == 0 else "1-0"), "час", board
         clock[side] += inc
         if res.move is None or res.move not in board.legal_moves:
