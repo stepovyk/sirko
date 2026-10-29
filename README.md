@@ -1,5 +1,7 @@
 # Сірко
 
+*A chess engine written from scratch in Rust: bitboards, PVS search with Lazy SMP, its own NNUE trained on its own self-play with its own trainer. No code from other engines, no dependencies. Plays on Lichess as [SirkoAI](https://lichess.org/@/SirkoAI). English summary at the end.*
+
 Шаховий рушій, написаний з нуля на Rust, без жодного чужого рушійного коду. Грає на Lichess як [SirkoAI](https://lichess.org/@/SirkoAI). Назва – на честь кошового Івана Сірка, найвідомішого характерника.
 
 ## Що всередині
@@ -54,3 +56,14 @@ sudo GIT_SSH_COMMAND="ssh -i /etc/sirko/deploy_key -o IdentitiesOnly=yes -o Stri
 ```
 
 Далі сервер щоночі сам ставить нову версію з гілки `release`, куди CI переносить лише перевірені коміти. Керування: `sirko-bot help`.
+
+## English
+
+Sirko is a UCI chess engine written from scratch in Rust with no dependencies and no code taken from other engines.
+
+- **Board**: bitboards with magic numbers found at startup, copy-make, standard chess and Chess960 (castling encoded as king-takes-rook).
+- **Search**: iterative deepening with aspiration windows, PVS, lock-free shared transposition table (Lazy SMP), null move, LMR, futility and late-move pruning, singular extensions, SEE-pruned quiescence, killers, history, countermoves.
+- **Evaluation**: a hand-written tapered evaluation and its own NNUE ((768 → H)×2 → 1, SCReLU, int16, incremental accumulators), trained by its own trainer on its own self-play.
+- **Verification**: perft and a differential move generator test against python-chess on tens of thousands of positions, UCI protocol checks, CI on x86 and ARM.
+
+Build: `cargo build --release`. License: GPL-3.0.
