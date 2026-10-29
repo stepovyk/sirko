@@ -112,6 +112,7 @@ jobs:
 
   match:
     needs: train
+    if: always() && needs.train.result == 'success'
     strategy:
       fail-fast: false
       matrix:
@@ -139,6 +140,7 @@ jobs:
 
   verdict:
     needs: match
+    if: always() && needs.match.result == 'success'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
