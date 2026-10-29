@@ -4,6 +4,7 @@ pub mod bitboard;
 pub mod datagen;
 pub mod eval;
 pub mod nnue;
+pub mod params;
 pub mod position;
 pub mod search;
 pub mod see;

@@ -1,0 +1,83 @@
+name: Підбір пошуку (SPSA)
+
+# Незалежні ланцюжки SPSA на кількох машинах, тоді середнє. Знайдені числа йдуть у рушій
+# лише після виграного матчу проти поточних (workflow «Матч версій»).
+on:
+  workflow_dispatch:
+    inputs:
+      chains:
+        description: "Скільки машин (ланцюжків)"
+        default: "16"
+      minutes:
+        description: "Хвилин підбору на машині"
+        default: "300"
+      tc:
+        description: "Контроль часу партій"
+        default: "5+0.05"
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      chains: ${{ steps.s.outputs.chains }}
+    steps:
+      - id: s
+        env:
+          CHAINS: ${{ inputs.chains }}
+        run: echo "chains=$(python3 -c 'import json,sys; print(json.dumps(list(range(min(20, int(sys.argv[1]))))))' "${CHAINS}")" >>"$GITHUB_OUTPUT"
+
+  chain:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        chain: ${{ fromJSON(needs.plan.outputs.chains) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v5
+      - name: Підбір
+        env:
+          MINUTES: ${{ inputs.minutes }}
+          TC: ${{ inputs.tc }}
+          CHAIN: ${{ matrix.chain }}
+        run: |
+          pip install --break-system-packages chess==1.11.2
+          cargo build --release
+          python3 tools/spsa.py ./target/release/sirko --minutes "${MINUTES}" --workers "$(nproc)" --tc "${TC}" \
+            --seed "${{ github.run_number }}${CHAIN}" --out "spsa-${CHAIN}.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spsa-${{ matrix.chain }}
+          path: spsa-${{ matrix.chain }}.json
+
+  average:
+    needs: chain
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: spsa-*
+          merge-multiple: true
+      - name: Середнє
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import glob, json
+          runs = [json.load(open(f)) for f in sorted(glob.glob("spsa-*.json"))]
+          names = sorted(runs[0]["params"])
+          print(f"Ланцюжків: {len(runs)}, пар партій: {sum(r['pairs'] for r in runs)}\n")
+          avg = {n: round(sum(r["params"][n] for r in runs) / len(runs)) for n in names}
+          print("```")
+          for n in names:
+              print(f"{n} {avg[n]}")
+          print("```")
+          json.dump(avg, open("spsa-average.json", "w"), indent=1)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spsa-average
+          path: spsa-average.json

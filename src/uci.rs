@@ -249,7 +249,12 @@ impl Engine {
                 self.stop();
                 self.shared.tt.clear();
             }
-            _ => {} // Ponder та інші – приймаємо мовчки
+            other => {
+                // Параметри пошуку (для підбору); Ponder та інші – приймаємо мовчки.
+                if let Ok(v) = value.parse::<i32>() {
+                    crate::params::set(other, v);
+                }
+            }
         }
     }
 
@@ -266,6 +271,14 @@ impl Engine {
                 println!("option name UCI_Chess960 type check default false");
                 println!("option name Clear Hash type button");
                 println!("option name EvalFile type string default <internal>");
+                if crate::params::tuning_enabled() {
+                    for p in crate::params::PARAMS.iter() {
+                        println!(
+                            "option name {} type spin default {} min {} max {}",
+                            p.name, p.default, p.min, p.max
+                        );
+                    }
+                }
                 println!("uciok");
             }
             Some("isready") => println!("readyok"),

@@ -4,12 +4,13 @@
 
 use crate::eval::{evaluate, SEE_VALUE};
 use crate::nnue::{feature, Network};
+use crate::params::{get, P};
 use crate::position::{MoveList, Position};
 use crate::see::see_ge;
 use crate::tt::*;
 use crate::types::*;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub const INF: i32 = 32001;
@@ -81,17 +82,16 @@ impl Shared {
     }
 }
 
-fn lmr_table() -> &'static [[i32; 64]; 64] {
-    static T: OnceLock<[[i32; 64]; 64]> = OnceLock::new();
-    T.get_or_init(|| {
-        let mut t = [[0; 64]; 64];
-        for (d, row) in t.iter_mut().enumerate().skip(1) {
-            for (m, v) in row.iter_mut().enumerate().skip(1) {
-                *v = (0.8 + (d as f64).ln() * (m as f64).ln() / 2.3) as i32;
-            }
+fn lmr_table() -> Box<[[i32; 64]; 64]> {
+    let base = get(P::LmrBase) as f64 / 100.0;
+    let div = get(P::LmrDiv) as f64 / 100.0;
+    let mut t = Box::new([[0; 64]; 64]);
+    for (d, row) in t.iter_mut().enumerate().skip(1) {
+        for (m, v) in row.iter_mut().enumerate().skip(1) {
+            *v = (base + (d as f64).ln() * (m as f64).ln() / div) as i32;
         }
-        t
-    })
+    }
+    t
 }
 
 /// Межі часу на хід (відлік – у Shared, бо його переносить ponderhit).
@@ -185,6 +185,8 @@ struct Worker<'a> {
     pv: Box<[[Move; MAX_PLY + 4]; MAX_PLY + 4]>,
     pv_len: [usize; MAX_PLY + 4],
     stopped: bool,
+    /// Скорочення пізніх ходів: [глибина][номер ходу] (з поточних параметрів пошуку).
+    lmr: Box<[[i32; 64]; 64]>,
     /// Накопичувачі мережі на кожну глибину: [глибина][бік][нейрон].
     acc: Vec<i16>,
 }
@@ -258,6 +260,7 @@ impl<'a> Worker<'a> {
             pv: Box::new([[Move::NONE; MAX_PLY + 4]; MAX_PLY + 4]),
             pv_len: [0; MAX_PLY + 4],
             stopped: false,
+            lmr: lmr_table(),
             acc: vec![
                 0;
                 shared
@@ -627,7 +630,7 @@ impl<'a> Worker<'a> {
                 } else {
                     0
                 };
-                if stand + gain + 200 <= alpha && !m.is_promo() {
+                if stand + gain + get(P::QsDelta) <= alpha && !m.is_promo() {
                     continue;
                 }
             }
@@ -755,8 +758,8 @@ impl<'a> Worker<'a> {
 
         if !pv_node && !in_check && excluded.is_none() {
             // Зворотне відсічення марності: статична оцінка вже набагато вища за beta.
-            if depth <= 8
-                && eval - 85 * (depth - improving as i32) >= beta
+            if depth <= get(P::RfpDepth)
+                && eval - get(P::RfpMargin) * (depth - improving as i32) >= beta
                 && eval.abs() < MATE_BOUND
             {
                 return eval;
@@ -769,7 +772,7 @@ impl<'a> Worker<'a> {
                 && p.non_pawn_material(p.side)
                 && beta.abs() < MATE_BOUND
             {
-                let r = 3 + depth / 4 + ((eval - beta) / 200).min(3);
+                let r = get(P::NmpBase) + depth / 4 + ((eval - beta) / get(P::NmpEvalDiv)).min(3);
                 let child = p.make_null();
                 self.acc_push(p, Move::NONE, ply);
                 self.push(ply, Move::NONE, NO_PIECE, child.key);
@@ -809,7 +812,6 @@ impl<'a> Worker<'a> {
         let mut n_quiets = 0;
         let mut captures_tried: [Move; 32] = [Move::NONE; 32];
         let mut n_captures = 0;
-        let lmr = lmr_table();
 
         for i in 0..list.len {
             pick(&mut list, &mut scores, i);
@@ -824,18 +826,22 @@ impl<'a> Worker<'a> {
             if !root && best > -MATE_BOUND && p.non_pawn_material(p.side) {
                 if quiet {
                     // Пізні тихі ходи на малій глибині не дивимося зовсім.
-                    let lmp = (3 + depth * depth) / (2 - improving as i32);
+                    let lmp = (get(P::LmpBase) + depth * depth) / (2 - improving as i32);
                     if !pv_node && depth <= 8 && legal > lmp && !in_check {
                         continue;
                     }
                     // Марний тихий хід: оцінка з запасом не дотягує до alpha.
-                    if !in_check && depth <= 7 && eval + 90 + 110 * depth <= alpha && !is_killer {
+                    if !in_check
+                        && depth <= get(P::FutDepth)
+                        && eval + get(P::FutBase) + get(P::FutMult) * depth <= alpha
+                        && !is_killer
+                    {
                         continue;
                     }
-                    if depth <= 8 && !see_ge(p, m, -60 * depth) {
+                    if depth <= 8 && !see_ge(p, m, -get(P::SeeQuiet) * depth) {
                         continue;
                     }
-                } else if depth <= 6 && !see_ge(p, m, -100 * depth) {
+                } else if depth <= 6 && !see_ge(p, m, -get(P::SeeCapture) * depth) {
                     continue;
                 }
             }
@@ -845,7 +851,7 @@ impl<'a> Worker<'a> {
             if !root
                 && m == tt_move
                 && excluded.is_none()
-                && depth >= 7
+                && depth >= get(P::SeDepth)
                 && ply < MAX_PLY / 2
                 && tt
                     .map(|e| {
@@ -856,7 +862,7 @@ impl<'a> Worker<'a> {
                 let tt_score = tt
                     .map(|e| score_from_tt(e.score, ply, p.halfmove))
                     .unwrap_or(0);
-                let s_beta = tt_score - depth * 2;
+                let s_beta = tt_score - depth * get(P::SeMargin);
                 let s = self.negamax(p, s_beta - 1, s_beta, (depth - 1) / 2, ply, cut, m);
                 if self.stopped {
                     return 0;
@@ -880,14 +886,14 @@ impl<'a> Worker<'a> {
                 // Пізні ходи – спершу з меншою глибиною й нульовим вікном.
                 let mut r = 0;
                 if depth >= 3 && legal > 1 + pv_node as i32 * 2 && (quiet || !see_ge(p, m, 0)) {
-                    r = lmr[depth.min(63) as usize][legal.min(63) as usize];
+                    r = self.lmr[depth.min(63) as usize][legal.min(63) as usize];
                     r -= pv_node as i32;
                     r -= is_killer as i32;
                     r += cut as i32;
                     r += !improving as i32;
                     r -= child.in_check() as i32;
                     if quiet {
-                        r -= self.quiet_score(p, m, ply) / 8000;
+                        r -= self.quiet_score(p, m, ply) / get(P::LmrHistDiv);
                     }
                     r -= tt_pv as i32;
                     r = r.clamp(0, new_depth - 1);
@@ -941,7 +947,7 @@ impl<'a> Worker<'a> {
                     }
                     self.pv_len[ply] = len + 1;
                     if score >= beta {
-                        let bonus = (depth * depth * 16).min(1600);
+                        let bonus = (depth * depth * get(P::HistMult)).min(get(P::HistMax));
                         // Взяття, що не дали відсічення, – гірші, ніж здавалося.
                         for &c in &captures_tried[..n_captures] {
                             if c != m {
@@ -1087,7 +1093,7 @@ pub fn think(
         let mut last_best = Move::NONE;
         for depth in 1..=max_depth {
             // Вікно прагнення навколо минулої оцінки.
-            let mut delta = 18;
+            let mut delta = get(P::AspDelta);
             let (mut alpha, mut beta) = if depth >= 4 {
                 (score - delta, score + delta)
             } else {
