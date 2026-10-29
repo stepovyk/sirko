@@ -350,10 +350,11 @@ impl<'a> Worker<'a> {
                 let h = net.hidden;
                 let base = ply * 2 * h;
                 let (white, black) = (&self.acc[base..base + h], &self.acc[base + h..base + 2 * h]);
+                let pieces = p.occupied().count_ones();
                 if p.side == WHITE {
-                    net.output(white, black)
+                    net.output(white, black, pieces)
                 } else {
-                    net.output(black, white)
+                    net.output(black, white, pieces)
                 }
             }
             None => evaluate(p),
@@ -1168,10 +1169,11 @@ mod tests {
         };
         Network {
             hidden: h,
+            buckets: 8,
             w1: (0..crate::nnue::INPUTS * h).map(|_| r(60)).collect(),
             b1: (0..h).map(|_| r(60)).collect(),
-            w2: (0..2 * h).map(|_| r(60)).collect(),
-            b2: 100,
+            w2: (0..8 * 2 * h).map(|_| r(60)).collect(),
+            b2: (0..8).map(|i| 100 + i).collect(),
         }
     }
 }

@@ -70,7 +70,7 @@ fn main() {
             });
         }
         Some("train") => {
-            // train ВИХІД ПРИХОВАНИХ ЕПОХ [--batch=N --lr=X --wdl=X] ДАНІ...
+            // train ВИХІД ПРИХОВАНИХ ЕПОХ [--batch=N --lr=X --wdl=X --buckets=N] ДАНІ...
             let num = |i: usize, d: usize| args.get(i).and_then(|v| v.parse().ok()).unwrap_or(d);
             let flag = |name: &str, d: f64| {
                 args.iter()
@@ -83,6 +83,7 @@ fn main() {
             sirko::train::run(sirko::train::Options {
                 out: args.get(2).cloned().unwrap_or_else(|| "sirko.nnue".into()),
                 hidden: num(3, 256),
+                buckets: flag("buckets", sirko::nnue::BUCKETS as f64) as usize,
                 epochs: num(4, 10),
                 data: args
                     .iter()

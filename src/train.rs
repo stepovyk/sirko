@@ -2,7 +2,7 @@
 //! й результату партії. Після навчання ваги квантуються в цілі й пишуться у файл мережі.
 
 use crate::datagen::{Sample, RECORD};
-use crate::nnue::{feature, Network, INPUTS, QA, QB};
+use crate::nnue::{bucket, feature, Network, INPUTS, QA, QB};
 use crate::types::*;
 use std::io::Read;
 use std::time::Instant;
@@ -10,6 +10,7 @@ use std::time::Instant;
 pub struct Options {
     pub data: Vec<String>,
     pub hidden: usize,
+    pub buckets: usize,
     pub epochs: usize,
     pub batch: usize,
     pub lr: f32,
@@ -22,7 +23,8 @@ const CLIP: f32 = 1.98;
 
 struct Model {
     h: usize,
-    p: Vec<f32>, // усі параметри підряд: w1, b1, w2, b2
+    b: usize,    // кошиків виходу
+    p: Vec<f32>, // усі параметри підряд: w1, b1, w2[кошик], b2[кошик]
 }
 
 impl Model {
@@ -36,13 +38,13 @@ impl Model {
         INPUTS * self.h + self.h
     }
     fn b2(&self) -> usize {
-        INPUTS * self.h + 3 * self.h
+        INPUTS * self.h + self.h + self.b * 2 * self.h
     }
-    fn len(h: usize) -> usize {
-        INPUTS * h + 3 * h + 1
+    fn len(h: usize, b: usize) -> usize {
+        INPUTS * h + h + b * 2 * h + b
     }
 
-    fn new(h: usize, seed: u64) -> Model {
+    fn new(h: usize, b: usize, seed: u64) -> Model {
         let mut s = seed | 1;
         let mut rnd = || {
             s ^= s << 13;
@@ -50,8 +52,12 @@ impl Model {
             s ^= s << 17;
             (s >> 11) as f32 / (1u64 << 53) as f32 * 2.0 - 1.0
         };
-        let mut p = vec![0.0f32; Model::len(h)];
-        let m = Model { h, p: Vec::new() };
+        let mut p = vec![0.0f32; Model::len(h, b)];
+        let m = Model {
+            h,
+            b,
+            p: Vec::new(),
+        };
         for x in &mut p[m.w1()..m.b1()] {
             *x = rnd() * 0.15;
         }
@@ -59,7 +65,7 @@ impl Model {
         for x in &mut p[m.w2()..m.b2()] {
             *x = rnd() * k;
         }
-        Model { h, p }
+        Model { h, b, p }
     }
 
     fn quantize(&self) -> Network {
@@ -71,6 +77,7 @@ impl Model {
         };
         Network {
             hidden: h,
+            buckets: self.b,
             w1: self.p[self.w1()..self.b1()]
                 .iter()
                 .map(|&x| q(x, QA))
@@ -83,7 +90,10 @@ impl Model {
                 .iter()
                 .map(|&x| q(x, QB))
                 .collect(),
-            b2: (self.p[self.b2()] * (QA * QB) as f32).round() as i32,
+            b2: self.p[self.b2()..]
+                .iter()
+                .map(|&x| (x * (QA * QB) as f32).round() as i32)
+                .collect(),
         }
     }
 }
@@ -128,8 +138,11 @@ fn step(m: &Model, s: &Sample, wdl: f32, grad: Option<&mut [f32]>, acc: &mut [f3
             a_them[j] += rt[j];
         }
     }
-    let w2 = &m.p[m.w2()..m.b2()];
-    let mut out = m.p[m.b2()];
+    let bk = bucket(s.occ.count_ones(), m.b);
+    let w2o = m.w2() + bk * 2 * h;
+    let b2o = m.b2() + bk;
+    let w2 = &m.p[w2o..w2o + 2 * h];
+    let mut out = m.p[b2o];
     for j in 0..h {
         let cu = a_us[j].clamp(0.0, 1.0);
         let ct = a_them[j].clamp(0.0, 1.0);
@@ -140,7 +153,7 @@ fn step(m: &Model, s: &Sample, wdl: f32, grad: Option<&mut [f32]>, acc: &mut [f3
     let loss = err * err;
     if let Some(g) = grad {
         let dout = 2.0 * err * pred * (1.0 - pred);
-        let (b1, w2o, b2o) = (m.b1(), m.w2(), m.b2());
+        let b1 = m.b1();
         g[b2o] += dout;
         // Градієнт за прихованим шаром – у тих самих буферах acc (вони вже не потрібні).
         for j in 0..h {
@@ -210,8 +223,8 @@ pub fn run(o: Options) {
         valid.len()
     );
 
-    let mut model = Model::new(o.hidden, 0x1234_5678);
-    let n = Model::len(o.hidden);
+    let mut model = Model::new(o.hidden, o.buckets.max(1), 0x1234_5678);
+    let n = Model::len(o.hidden, o.buckets.max(1));
     let mut m1 = vec![0.0f32; n];
     let mut m2 = vec![0.0f32; n];
     let (beta1, beta2, eps) = (0.9f32, 0.999f32, 1e-8f32);
@@ -302,7 +315,7 @@ mod tests {
     #[test]
     fn quantized_matches_float() {
         crate::bitboard::init();
-        let model = Model::new(32, 99);
+        let model = Model::new(32, 8, 99);
         let net = model.quantize();
         for fen in [
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
@@ -320,8 +333,9 @@ mod tests {
                     at[j] += model.p[them[i] as usize * h + j];
                 }
             }
-            let w2 = &model.p[model.w2()..model.b2()];
-            let mut out = model.p[model.b2()];
+            let bk = bucket(p.occupied().count_ones(), model.b);
+            let w2 = &model.p[model.w2() + bk * 2 * h..model.w2() + (bk + 1) * 2 * h];
+            let mut out = model.p[model.b2() + bk];
             for j in 0..h {
                 out += au[j].clamp(0.0, 1.0).powi(2) * w2[j]
                     + at[j].clamp(0.0, 1.0).powi(2) * w2[h + j];
