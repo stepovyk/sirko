@@ -55,7 +55,7 @@ jobs:
           opts=()
           for o in ${OPTS}; do opts+=(--a-opt "$o" --b-opt "$o"); done
           python3 tools/match.py --a ../test/target/release/sirko --b ../base/target/release/sirko "${opts[@]}" \
-            --games "${GAMES}" --tc "${TC}" --seed "${SHARD}0" | tee match.txt
+            --games "${GAMES}" --tc "${TC}" --seed "${{ github.run_number }}${SHARD}" | tee match.txt
           grep "^\[" match.txt | tail -n 1 >"result-${SHARD}.txt"
       - uses: actions/upload-artifact@v4
         with:
