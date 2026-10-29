@@ -23,6 +23,12 @@ on:
       games:
         description: "Партій матчу на кожну з 8 машин"
         default: "50"
+      buckets:
+        description: "Кошиків виходу мережі"
+        default: "8"
+      data_run:
+        description: "Номер запуску, чию самогру взяти замість нової (порожньо – нова самогра)"
+        default: ""
 
 permissions:
   contents: read
@@ -40,6 +46,7 @@ jobs:
 
   selfplay:
     needs: plan
+    if: inputs.data_run == ''
     strategy:
       fail-fast: false
       matrix:
@@ -65,24 +72,38 @@ jobs:
 
   train:
     needs: selfplay
+    if: always() && (needs.selfplay.result == 'success' || needs.selfplay.result == 'skipped')
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    permissions:
+      actions: read
+      contents: read
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
+        if: inputs.data_run == ''
         with:
           pattern: data-*
           path: data
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        if: inputs.data_run != ''
+        with:
+          pattern: data-*
+          path: data
+          merge-multiple: true
+          run-id: ${{ inputs.data_run }}
+          github-token: ${{ github.token }}
       - name: Збирання
         run: cargo build --release
       - name: Навчання
         env:
           HIDDEN: ${{ inputs.hidden }}
           EPOCHS: ${{ inputs.epochs }}
+          BUCKETS: ${{ inputs.buckets }}
         run: |
           ls -la data
-          ./target/release/sirko train sirko.nnue "${HIDDEN}" "${EPOCHS}" --batch=16384 --lr=0.001 --wdl=0.4 data/*.bin
+          ./target/release/sirko train sirko.nnue "${HIDDEN}" "${EPOCHS}" --batch=16384 --lr=0.001 --wdl=0.4 "--buckets=${BUCKETS}" data/*.bin
       - uses: actions/upload-artifact@v4
         with:
           name: net
