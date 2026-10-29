@@ -129,9 +129,18 @@ impl<'a> Clock<'a> {
         let time = limits.time[side].unwrap_or(0);
         let inc = limits.inc[side];
         let left = time.saturating_sub(overhead).max(1);
-        let mtg = limits.movestogo.unwrap_or(30).clamp(1, 40);
-        // М'яка межа: частка часу плюс більша частина надбавки; жорстка – не більше 40% годинника.
-        let soft = (left / mtg + inc * 3 / 4).min(left / 2);
+        // Без надбавки – обережніше: партія може тривати сотні ходів.
+        let mtg = limits
+            .movestogo
+            .unwrap_or(if inc == 0 { 40 } else { 30 })
+            .clamp(1, 50);
+        // Час на решту ходів: годинник і майбутні надбавки мінус затримка на кожен хід,
+        // тож у цейтноті рушій ходить миттєво, а не спалює останні мілісекунди.
+        let pool = (time + inc * (mtg - 1))
+            .saturating_sub(overhead * (mtg + 2))
+            .max(1);
+        // М'яка межа: частка цього часу; жорстка – не більше 40% годинника.
+        let soft = (pool / mtg).min(left / 2);
         let hard = (soft * 4).min(left * 2 / 5).max(soft);
         Clock {
             shared: start,
@@ -1199,6 +1208,36 @@ pub fn think(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn budget(time: u64, inc: u64, overhead: u64) -> (u64, u64) {
+        let shared = Shared::new(1, 1);
+        let limits = Limits {
+            time: [Some(time), Some(time)],
+            inc: [inc, inc],
+            ..Limits::default()
+        };
+        let c = Clock::new(&shared, &limits, WHITE, overhead);
+        let ms = |d: Option<Duration>| d.unwrap().as_millis() as u64;
+        (ms(c.soft), ms(c.hard))
+    }
+
+    /// Без надбавки годинника вистачає на 300 ходів, навіть якщо кожен хід бере м'яку межу
+    /// й ще 3 мс зверху; у цейтноті рушій ходить миттєво; з надбавкою час розумний.
+    #[test]
+    fn time_budget() {
+        let mut clock = 60_000i64;
+        for _ in 0..300 {
+            let (soft, hard) = budget(clock.max(0) as u64, 0, 30);
+            assert!(soft <= hard && hard < clock.max(1) as u64);
+            clock -= soft as i64 + 3;
+            assert!(clock > 0, "годинник скінчився");
+        }
+        assert_eq!(budget(1000, 0, 30).0, 1);
+        let (soft, hard) = budget(8000, 80, 30);
+        assert!((250..=400).contains(&soft) && hard <= 3200, "{soft} {hard}");
+        let (soft, _) = budget(2000, 2000, 30);
+        assert!(soft <= 985, "{soft}");
+    }
 
     /// Накопичувачі, оновлені ходами, збігаються з перерахованими з нуля (усі види ходів).
     #[test]
