@@ -2,6 +2,7 @@
 name = "sirko"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.75"
 description = "Сірко – власний шаховий рушій Характерника"
 license = "GPL-3.0-only"
 publish = false

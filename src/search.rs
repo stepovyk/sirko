@@ -113,6 +113,12 @@ impl<'a> Clock<'a> {
                 hard: Some(t),
             };
         }
+        // Годинник лише одного боку (так буває в python-chess): рахуємо за ним, а не думаємо без кінця.
+        let side = if limits.time[side].is_none() && limits.time[side ^ 1].is_some() {
+            side ^ 1
+        } else {
+            side
+        };
         if limits.infinite || limits.time[side].is_none() {
             return Clock {
                 shared: start,
@@ -162,6 +168,8 @@ struct Worker<'a> {
     seldepth: usize,
     /// Ключі позицій від початку партії до поточного вузла (для повторень).
     keys: Vec<u64>,
+    /// Для кожного ключа – скільки ходів минуло від останнього нульового (крізь нього повторів немає).
+    since_null: Vec<u16>,
     /// Скільки ключів з keys – з історії партії (до кореня пошуку).
     root_len: usize,
     killers: [[Move; 2]; MAX_PLY + 4],
@@ -222,6 +230,9 @@ impl<'a> Worker<'a> {
     ) -> Worker<'a> {
         let mut keys = Vec::with_capacity(history_keys.len() + MAX_PLY + 8);
         keys.extend_from_slice(history_keys);
+        let since_null = (0..keys.len())
+            .map(|i| i.min(u16::MAX as usize) as u16)
+            .collect();
         Worker {
             id,
             shared,
@@ -230,6 +241,7 @@ impl<'a> Worker<'a> {
             nodes: 0,
             seldepth: 0,
             root_len: keys.len(),
+            since_null,
             keys,
             killers: [[Move::NONE; 2]; MAX_PLY + 4],
             history: Box::new([[[0; 64]; 64]; 2]),
@@ -381,7 +393,9 @@ impl<'a> Worker<'a> {
             return true;
         }
         let cur = self.keys.len() as isize - 1;
-        let oldest = cur - p.halfmove as isize; // раніше незворотного ходу позиція повторитися не могла
+        // Раніше незворотного ходу чи нульового ходу позиція повторитися не могла.
+        let back = (p.halfmove as isize).min(self.since_null.last().map_or(0, |&n| n as isize));
+        let oldest = cur - back;
         let mut j = cur - 4;
         let mut earlier = 0;
         while j >= 0 && j >= oldest {
@@ -464,11 +478,18 @@ impl<'a> Worker<'a> {
     fn push(&mut self, ply: usize, m: Move, piece: u8, key: u64) {
         self.stack_move[ply] = m;
         self.stack_piece[ply] = piece;
+        let since = if m.is_none() {
+            0
+        } else {
+            self.since_null.last().map_or(0, |&n| n.saturating_add(1))
+        };
         self.keys.push(key);
+        self.since_null.push(since);
     }
 
     fn pop(&mut self) {
         self.keys.pop();
+        self.since_null.pop();
     }
 
     fn quiescence(&mut self, p: &Position, mut alpha: i32, beta: i32, ply: usize) -> i32 {

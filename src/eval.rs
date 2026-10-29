@@ -326,7 +326,7 @@ fn evaluate_white(p: &Position) -> S {
             }
         };
         side += KING_SHIELD * count(our_pawns & shield_zone).min(3) as i32;
-        for f in [kf.saturating_sub(1), kf, (kf + 1).min(7)] {
+        for f in kf.saturating_sub(1)..=(kf + 1).min(7) {
             if our_pawns & file_bb(f) == 0 {
                 side += KING_OPEN_FILE;
             }

@@ -22,6 +22,9 @@ pub struct Engine {
     threads: usize,
     overhead: u64,
     chess960: bool,
+    /// Остання команда position була зрозуміла (інакше go відповідає «bestmove 0000», а не ходом зі старої позиції).
+    valid: bool,
+    infinite: bool,
     net: Option<&'static Network>,
     search: Option<JoinHandle<()>>,
 }
@@ -45,6 +48,8 @@ impl Engine {
             threads: 1,
             overhead: 30,
             chess960: false,
+            valid: true,
+            infinite: false,
             search: None,
         }
     }
@@ -86,11 +91,13 @@ impl Engine {
             Ok(p) => p,
             Err(e) => {
                 println!("info string помилка позиції: {e}");
+                self.valid = false;
                 return;
             }
         };
         p.chess960 |= self.chess960;
         let mut keys = vec![p.key];
+        self.valid = true;
         if words.get(i) == Some(&"moves") {
             for text in &words[i + 1..] {
                 match p.parse_uci(text) {
@@ -100,6 +107,7 @@ impl Engine {
                     }
                     None => {
                         println!("info string нелегальний хід {text}");
+                        self.valid = false;
                         break;
                     }
                 }
@@ -137,20 +145,37 @@ impl Engine {
         }
         let shared = Arc::clone(&self.shared);
         shared.pondering.store(l.ponder, Ordering::Relaxed);
+        self.infinite = l.infinite;
+        let valid = self.valid;
         let pos = self.pos;
         let keys = self.keys.clone();
         let threads = self.threads;
         let overhead = self.overhead;
         self.search = Some(std::thread::spawn(move || {
-            let r = think(
-                &pos,
-                &keys,
-                &l,
-                Arc::clone(&shared),
-                threads,
-                overhead,
-                true,
-            );
+            let r = if valid {
+                think(
+                    &pos,
+                    &keys,
+                    &l,
+                    Arc::clone(&shared),
+                    threads,
+                    overhead,
+                    true,
+                )
+            } else {
+                crate::search::Report {
+                    best: Move::NONE,
+                    ponder: Move::NONE,
+                    score: 0,
+                }
+            };
+            // На час суперника (і в нескінченному пошуку) відповідь іде лише після stop чи ponderhit,
+            // навіть якщо думати вже нема про що.
+            while (l.infinite || shared.pondering.load(Ordering::Relaxed))
+                && !shared.stop.load(Ordering::Relaxed)
+            {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
             if r.best.is_none() {
                 println!("bestmove 0000");
             } else {
@@ -275,6 +300,11 @@ impl Engine {
                 return;
             }
         }
-        self.stop();
+        // Кінець вводу: скінченний пошук доводимо до відповіді, нескінченний і на час суперника – зупиняємо.
+        if self.infinite || self.shared.pondering.load(Ordering::Relaxed) {
+            self.stop();
+        } else {
+            self.wait();
+        }
     }
 }
