@@ -185,6 +185,8 @@ struct Worker<'a> {
     pv: Box<[[Move; MAX_PLY + 4]; MAX_PLY + 4]>,
     pv_len: [usize; MAX_PLY + 4],
     stopped: bool,
+    /// Вузли, витрачені на кожен хід кореня ([звідки][куди]): частка найкращого – мірило очевидності.
+    root_nodes: Box<[[u64; 64]; 64]>,
     /// Накопичувачі мережі на кожну глибину: [глибина][бік][нейрон].
     acc: Vec<i16>,
 }
@@ -258,6 +260,7 @@ impl<'a> Worker<'a> {
             pv: Box::new([[Move::NONE; MAX_PLY + 4]; MAX_PLY + 4]),
             pv_len: [0; MAX_PLY + 4],
             stopped: false,
+            root_nodes: Box::new([[0; 64]; 64]),
             acc: vec![
                 0;
                 shared
@@ -872,6 +875,7 @@ impl<'a> Worker<'a> {
             let piece = p.piece_at(m.from());
             self.acc_push(p, m, ply);
             self.push(ply, m, piece, child.key);
+            let nodes_before = self.nodes;
             let new_depth = depth - 1 + ext;
             let mut score;
             if legal == 1 {
@@ -918,6 +922,9 @@ impl<'a> Worker<'a> {
                 }
             }
             self.pop();
+            if root {
+                self.root_nodes[m.from() as usize][m.to() as usize] += self.nodes - nodes_before;
+            }
             if self.stopped {
                 return 0;
             }
@@ -1160,7 +1167,7 @@ pub fn think(
                 }
             }
             // Єдиний хід або стабільний найкращий – менше часу; хитання – більше.
-            let factor = if legal.len == 1 {
+            let stability = if legal.len == 1 {
                 0.2
             } else if stable >= 4 {
                 0.7
@@ -1169,6 +1176,14 @@ pub fn think(
             } else {
                 1.0
             };
+            // Частка вузлів, що пішли на найкращий хід: велика – хід очевидний, мала – варто думати довше.
+            let best = result.best;
+            let effort = if w.nodes > 0 {
+                w.root_nodes[best.from() as usize][best.to() as usize] as f64 / w.nodes as f64
+            } else {
+                0.5
+            };
+            let factor = stability * (1.6 - effort).clamp(0.6, 1.5);
             let pondering = shared.pondering.load(Ordering::Relaxed);
             if !pondering && !limits.infinite && !clock.continue_iterating(factor) {
                 break;
