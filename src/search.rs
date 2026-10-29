@@ -158,6 +158,9 @@ impl<'a> Clock<'a> {
 }
 
 const HISTORY_MAX: i32 = 16384;
+const CORR_SIZE: usize = 16384;
+const CORR_GRAIN: i32 = 256;
+const CORR_MAX: i32 = 128 * CORR_GRAIN;
 
 struct Worker<'a> {
     id: usize,
@@ -179,6 +182,8 @@ struct Worker<'a> {
     cont: Vec<i32>,
     /// Історія взять: [фігура][поле][хто взятий].
     capture_hist: Box<[[[i32; 6]; 64]; 12]>,
+    /// Корекція статичної оцінки за пішаковою структурою: [бік][частина ключа пішаків].
+    correction: Box<[[i32; CORR_SIZE]; 2]>,
     stack_move: [Move; MAX_PLY + 4],
     stack_piece: [u8; MAX_PLY + 4],
     eval_stack: [i32; MAX_PLY + 4],
@@ -252,6 +257,10 @@ impl<'a> Worker<'a> {
             counter: Box::new([[Move::NONE; 64]; 12]),
             cont: vec![0; 12 * 64 * 12 * 64],
             capture_hist: Box::new([[[0; 6]; 64]; 12]),
+            correction: vec![[0; CORR_SIZE]; 2]
+                .into_boxed_slice()
+                .try_into()
+                .expect("розмір"),
             stack_move: [Move::NONE; MAX_PLY + 4],
             stack_piece: [NO_PIECE; MAX_PLY + 4],
             eval_stack: [0; MAX_PLY + 4],
@@ -522,6 +531,18 @@ impl<'a> Worker<'a> {
     }
 
     #[inline(always)]
+    fn corrected(&self, p: &Position, raw: i32) -> i32 {
+        let c = self.correction[p.side][(p.pawn_key as usize) % CORR_SIZE];
+        (raw + c / CORR_GRAIN).clamp(-MATE_BOUND + 1, MATE_BOUND - 1)
+    }
+
+    fn update_correction(&mut self, p: &Position, diff: i32, depth: i32) {
+        let w = (depth + 1).min(16);
+        let c = &mut self.correction[p.side][(p.pawn_key as usize) % CORR_SIZE];
+        *c = ((*c * (256 - w) + diff * CORR_GRAIN * w) / 256).clamp(-CORR_MAX, CORR_MAX);
+    }
+
+    #[inline(always)]
     fn victim(p: &Position, m: Move) -> usize {
         if m.is_ep() || !m.is_capture() {
             PAWN
@@ -730,10 +751,22 @@ impl<'a> Worker<'a> {
             }
         }
 
+        // Сира статична оцінка (вона й іде в таблицю) і виправлена історією корекції.
+        let raw_eval = if in_check {
+            -INF
+        } else {
+            tt.map(|e| e.eval)
+                .unwrap_or_else(|| self.static_eval(p, ply))
+        };
+        let corrected = if in_check {
+            -INF
+        } else {
+            self.corrected(p, raw_eval)
+        };
         let eval = if in_check {
             -INF
         } else if let Some(e) = tt {
-            let mut v = e.eval;
+            let mut v = corrected;
             let s = score_from_tt(e.score, ply, p.halfmove);
             // Оцінка з таблиці точніша за статичну, якщо межа це дозволяє.
             let tighter = (e.bound == BOUND_LOWER && s > v)
@@ -744,7 +777,7 @@ impl<'a> Worker<'a> {
             }
             v
         } else {
-            self.static_eval(p, ply)
+            corrected
         };
         self.eval_stack[ply] = eval;
         let improving = !in_check && ply >= 2 && eval > self.eval_stack[ply - 2];
@@ -995,11 +1028,21 @@ impl<'a> Worker<'a> {
                 p.key,
                 best_move,
                 score_to_tt(best, ply),
-                if in_check { 0 } else { eval },
+                if in_check { 0 } else { raw_eval },
                 depth,
                 bound,
                 tt_pv,
             );
+            // Наскільки пошук розійшовся зі статичною оцінкою – запам'ятати для цієї пішакової структури.
+            let reliable = !(bound == BOUND_LOWER && best <= corrected)
+                && !(bound == BOUND_UPPER && best >= corrected);
+            if !in_check
+                && (best_move.is_none() || !best_move.is_tactical())
+                && reliable
+                && best.abs() < MATE_BOUND
+            {
+                self.update_correction(p, best - raw_eval, depth);
+            }
         }
         best
     }
