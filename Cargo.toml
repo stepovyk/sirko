@@ -1,0 +1,19 @@
+[package]
+name = "sirko"
+version = "0.1.0"
+edition = "2021"
+description = "Сірко – власний шаховий рушій Характерника"
+license = "GPL-3.0-only"
+publish = false
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false
+
+[profile.test]
+opt-level = 3
