@@ -39,9 +39,14 @@ jobs:
           pip install --break-system-packages chess==1.11.2
           git worktree add -f ../engine "origin/${REF}" 2>/dev/null || git worktree add -f ../engine "${REF}"
           (cd ../engine && cargo build --release -q)
-          gh release download -R official-stockfish/Stockfish --pattern 'stockfish-ubuntu-x86-64-avx2.tar' -D ../sf
-          tar -xf ../sf/stockfish-ubuntu-x86-64-avx2.tar -C ../sf
-          ../sf/stockfish/stockfish-ubuntu-x86-64-avx2 quit
+          # Назви файлів змінюються від версії до версії: беремо збірку під x86-64 і шукаємо в ній рушій.
+          gh release download -R official-stockfish/Stockfish --pattern 'stockfish-linux-x86-64*' --pattern 'stockfish-ubuntu-x86-64-avx2*' -D ../sf
+          ls ../sf
+          for f in ../sf/*.tar*; do tar -xf "$f" -C ../sf; done
+          sf=$(find ../sf -type f -perm -u+x -name 'stockfish*' | head -n 1)
+          test -n "$sf"
+          ln -s "$(realpath "$sf")" ../stockfish
+          printf 'uci\nquit\n' | ../stockfish | grep -E "^id name|UCI_Elo"
       - name: Матч
         env:
           ELO: ${{ inputs.elo }}
@@ -49,7 +54,7 @@ jobs:
           TC: ${{ inputs.tc }}
           SHARD: ${{ matrix.shard }}
         run: |
-          python3 tools/match.py --a ../engine/target/release/sirko --b ../sf/stockfish/stockfish-ubuntu-x86-64-avx2 \
+          python3 tools/match.py --a ../engine/target/release/sirko --b ../stockfish \
             --b-opt UCI_LimitStrength=true --b-opt "UCI_Elo=${ELO}" \
             --games "${GAMES}" --tc "${TC}" --seed "${{ github.run_number }}${SHARD}" | tee match.txt
           grep "^\[" match.txt | tail -n 1 >"result-${SHARD}.txt"
