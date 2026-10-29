@@ -13,7 +13,7 @@
 
 ## Мережа
 
-Самогра (`sirko datagen ПАРТІЙ ВУЗЛІВ ПОТОКІВ ФАЙЛ`) пише спокійні позиції з оцінкою пошуку й результатом партії. Власний тренер (`sirko train ВИХІД ПРИХОВАНИХ ЕПОХ ДАНІ...`) вчить мережу (768 → H)×2 → 1 зі SCReLU, а рушій оцінює нею позиції з покроковим оновленням накопичувачів. Мережа з `nets/sirko.nnue` вбудовується при збиранні, а `setoption name EvalFile` дає перевірити іншу без перезбирання.
+Самогра (`sirko datagen ПАРТІЙ ВУЗЛІВ ПОТОКІВ ФАЙЛ`) пише спокійні позиції з оцінкою пошуку й результатом партії. Власний тренер (`sirko train ВИХІД ПРИХОВАНИХ ЕПОХ ДАНІ...`) вчить мережу (768 → H)×2 → 1 зі SCReLU і окремим виходом залежно від кількості фігур, а рушій оцінює нею позиції з покроковим оновленням накопичувачів. Мережа з `nets/sirko.nnue` вбудовується при збиранні, а `setoption name EvalFile` дає перевірити іншу без перезбирання.
 
 ## Перевірки
 
@@ -40,6 +40,7 @@ python3 tools/match.py --a ./target/release/sirko --b stockfish --b-opt UCI_Limi
 |---|---|
 | Історія продовжень і взять | +14 ± 14 Elo (2400 партій, 5+0,05 с) |
 | Власна мережа (256 нейронів, 54 млн позицій самогри) | +195 ± 28 Elo проти ручної оцінки (800 партій, 8+0,08 с) |
+| Мережа другого покоління (86 млн позицій самогри вже з мережею, 8 виходів) | +67 ± 25 Elo проти першої мережі (800 партій, 8+0,08 с) |
 
 Мережа вбудована в рушій, ручна оцінка лишилася запасною.
 
@@ -70,7 +71,7 @@ Sirko is a UCI chess engine written from scratch in Rust with no dependencies an
 
 - **Board**: bitboards with magic numbers found at startup, copy-make, standard chess and Chess960 (castling encoded as king-takes-rook).
 - **Search**: iterative deepening with aspiration windows, PVS, lock-free shared transposition table (Lazy SMP), null move, LMR, futility and late-move pruning, singular extensions, SEE-pruned quiescence, killers, history, countermoves.
-- **Evaluation**: a hand-written tapered evaluation and its own NNUE ((768 → H)×2 → 1, SCReLU, int16, incremental accumulators), trained by its own trainer on its own self-play.
+- **Evaluation**: a hand-written tapered evaluation and its own NNUE ((768 → H)×2 → 1 with output buckets by piece count, SCReLU, int16, incremental accumulators), trained by its own trainer on its own self-play.
 - **Verification**: perft and a differential move generator test against python-chess on tens of thousands of positions, UCI protocol checks, CI on x86 and ARM.
 
 Build: `cargo build --release`. License: GPL-3.0.
