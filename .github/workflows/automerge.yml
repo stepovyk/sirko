@@ -1,0 +1,67 @@
+# Оновлення від Dependabot зливаються самі, щойно всі перевірки коміту зелені.
+# Мажорні версії залежностей коду лишаються на розгляд; дії GitHub – будь-які.
+name: Автозлиття оновлень
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  statuses: read
+
+concurrency:
+  group: automerge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  automerge:
+    name: Автозлиття
+    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    steps:
+      - name: Що оновлюється
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+
+      - name: Злиття після зелених перевірок
+        if: steps.meta.outputs.update-type != 'version-update:semver-major' || steps.meta.outputs.package-ecosystem == 'github_actions'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + 90 * 60 ))
+          sleep 20
+          while :; do
+            # Для кожної перевірки – лише останній запуск: перезапуск після збою важить, старий – ні.
+            checks=$(gh api --paginate "repos/$REPO/commits/$SHA/check-runs?per_page=100" --jq '.check_runs[]' \
+              | jq -s '[group_by(.name)[] | max_by(.id) | select(.name != "Автозлиття")
+                        | {name, state: (if .status != "completed" then "pending"
+                                         elif (.conclusion | IN("success", "skipped", "neutral")) then "ok"
+                                         else "fail" end)}]')
+            statuses=$(gh api "repos/$REPO/commits/$SHA/status" \
+              --jq '[.statuses[] | {name: .context, state: (if .state == "success" then "ok" elif .state == "pending" then "pending" else "fail" end)}]')
+            all=$(jq -s 'add' <<<"$checks $statuses")
+            failed=$(jq -r '.[] | select(.state == "fail") | .name' <<<"$all")
+            pending=$(jq -r '.[] | select(.state == "pending") | .name' <<<"$all")
+            if [ -n "$failed" ]; then
+              echo "::error::Не пройшли перевірки: $(paste -sd ',' <<<"$failed"). Оновлення лишається на розгляд."
+              exit 1
+            fi
+            if [ -z "$pending" ]; then
+              echo "Перевірки: $(jq -r 'if length == 0 then "немає" else map(.name) | join(", ") end' <<<"$all")"
+              gh pr merge "$PR" --repo "$REPO" --squash --match-head-commit "$SHA"
+              exit 0
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::Перевірки не завершились вчасно: $(paste -sd ',' <<<"$pending")."
+              exit 1
+            fi
+            sleep 30
+          done
