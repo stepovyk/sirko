@@ -206,6 +206,8 @@ struct Worker<'a> {
     /// Скільки ключів з keys – з історії партії (до кореня пошуку).
     root_len: usize,
     killers: [[Move; 2]; MAX_PLY + 4],
+    /// Скільки вузлів пішло на кожен хід кореня (для розподілу часу).
+    root_nodes: Vec<(Move, u64)>,
     h: MutexGuard<'a, Box<Heuristics>>,
     stack_move: [Move; MAX_PLY + 4],
     stack_piece: [u8; MAX_PLY + 4],
@@ -278,6 +280,7 @@ impl<'a> Worker<'a> {
             since_null,
             keys,
             killers: [[Move::NONE; 2]; MAX_PLY + 4],
+            root_nodes: Vec::new(),
             h: shared.heuristics[id]
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()),
@@ -901,6 +904,7 @@ impl<'a> Worker<'a> {
                 }
             }
 
+            let nodes_before = self.nodes;
             let child = p.make(m);
             let piece = p.piece_at(m.from());
             self.acc_push(p, m, ply);
@@ -951,6 +955,13 @@ impl<'a> Worker<'a> {
                 }
             }
             self.pop();
+            if root {
+                let spent = self.nodes - nodes_before;
+                match self.root_nodes.iter_mut().find(|(rm, _)| *rm == m) {
+                    Some((_, n)) => *n += spent,
+                    None => self.root_nodes.push((m, spent)),
+                }
+            }
             if self.stopped {
                 return 0;
             }
@@ -1201,6 +1212,17 @@ pub fn think(
                 1.5
             } else {
                 1.0
+            };
+            // Чим більша частка вузлів пішла на найкращий хід, тим певніший вибір і тим менше часу.
+            let factor = if depth >= 6 && w.nodes > 0 {
+                let best_nodes = w
+                    .root_nodes
+                    .iter()
+                    .find(|(m, _)| *m == last_best)
+                    .map_or(0, |&(_, n)| n);
+                factor * (1.5 - best_nodes as f64 / w.nodes as f64) * 1.35
+            } else {
+                factor
             };
             let pondering = shared.pondering.load(Ordering::Relaxed);
             if !pondering && !limits.infinite && !clock.continue_iterating(factor) {
