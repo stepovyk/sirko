@@ -10,7 +10,7 @@ updates:
       timezone: Europe/Kyiv
     labels: []
     commit-message:
-      prefix: "Залежності"
+      prefix: "Залежності:"
     groups:
       actions:
         patterns: ["*"]
