@@ -23,25 +23,25 @@ macro_rules! params {
 }
 
 params! {
-    RfpMargin = "rfp_margin", 85, 40, 160;
-    RfpDepth = "rfp_depth", 8, 4, 12;
-    NmpBase = "nmp_base", 3, 2, 5;
-    NmpEvalDiv = "nmp_eval_div", 200, 100, 400;
-    LmpBase = "lmp_base", 3, 1, 8;
-    FutBase = "fut_base", 90, 30, 200;
-    FutMult = "fut_mult", 110, 50, 200;
+    RfpMargin = "rfp_margin", 83, 40, 160;
+    RfpDepth = "rfp_depth", 5, 4, 12;
+    NmpBase = "nmp_base", 4, 2, 5;
+    NmpEvalDiv = "nmp_eval_div", 198, 100, 400;
+    LmpBase = "lmp_base", 5, 1, 8;
+    FutBase = "fut_base", 89, 30, 200;
+    FutMult = "fut_mult", 111, 50, 200;
     FutDepth = "fut_depth", 7, 4, 10;
-    SeeQuiet = "see_quiet", 60, 20, 120;
-    SeeCapture = "see_capture", 100, 40, 200;
+    SeeQuiet = "see_quiet", 58, 20, 120;
+    SeeCapture = "see_capture", 98, 40, 200;
     LmrBase = "lmr_base", 80, 30, 150;      // ×0,01
-    LmrDiv = "lmr_div", 230, 150, 350;      // ×0,01
-    LmrHistDiv = "lmr_hist_div", 8000, 3000, 16000;
-    SeDepth = "se_depth", 7, 5, 10;
-    SeMargin = "se_margin", 2, 1, 4;
-    AspDelta = "asp_delta", 18, 8, 40;
-    QsDelta = "qs_delta", 200, 80, 400;
+    LmrDiv = "lmr_div", 227, 150, 350;      // ×0,01
+    LmrHistDiv = "lmr_hist_div", 7589, 3000, 16000;
+    SeDepth = "se_depth", 9, 5, 10;
+    SeMargin = "se_margin", 3, 1, 4;
+    AspDelta = "asp_delta", 17, 8, 40;
+    QsDelta = "qs_delta", 224, 80, 400;
     HistMult = "hist_mult", 16, 6, 32;
-    HistMax = "hist_max", 1600, 600, 3000;
+    HistMax = "hist_max", 1586, 600, 3000;
 }
 
 #[inline(always)]
