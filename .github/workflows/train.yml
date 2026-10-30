@@ -29,6 +29,9 @@ on:
       data_run:
         description: "Номер запуску, чию самогру взяти замість нової (порожньо – нова самогра)"
         default: ""
+      extra_runs:
+        description: "Номери попередніх запусків, чию самогру додати до цієї (через пробіл)"
+        default: ""
 
 permissions:
   contents: read
@@ -94,6 +97,17 @@ jobs:
           merge-multiple: true
           run-id: ${{ inputs.data_run }}
           github-token: ${{ github.token }}
+      - name: Самогра попередніх запусків
+        if: inputs.extra_runs != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNS: ${{ inputs.extra_runs }}
+        run: |
+          for id in ${RUNS}; do
+            gh run download "${id}" -R "${GITHUB_REPOSITORY}" -p 'data-*' -D "extra/${id}"
+            mkdir -p data
+            find "extra/${id}" -name '*.bin' | while read -r f; do mv "$f" "data/${id}-$(basename "$f")"; done
+          done
       - name: Збирання
         run: cargo build --release
       - name: Навчання
