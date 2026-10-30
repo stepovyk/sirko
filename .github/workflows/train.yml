@@ -57,7 +57,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Збирання
         run: cargo build --release
       - name: Самогра
@@ -66,7 +66,7 @@ jobs:
           MINUTES: ${{ inputs.minutes }}
           SHARD: ${{ matrix.shard }}
         run: ./target/release/sirko datagen 1000000000 "${NODES}" "$(nproc)" "data-${SHARD}.bin" "${MINUTES}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: data-${{ matrix.shard }}
           path: data-${{ matrix.shard }}.bin
@@ -82,14 +82,14 @@ jobs:
       actions: read
       contents: read
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         if: inputs.data_run == ''
         with:
           pattern: data-*
           path: data
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         if: inputs.data_run != ''
         with:
           pattern: data-*
@@ -118,7 +118,7 @@ jobs:
         run: |
           ls -la data
           ./target/release/sirko train sirko.nnue "${HIDDEN}" "${EPOCHS}" --batch=16384 --lr=0.001 --wdl=0.4 "--buckets=${BUCKETS}" data/*.bin
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: net
           path: sirko.nnue
@@ -133,8 +133,8 @@ jobs:
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: net
       - name: Матч нової мережі проти поточного Сірка
@@ -147,7 +147,7 @@ jobs:
           python3 tools/match.py --a ./target/release/sirko --a-opt "EvalFile=$PWD/sirko.nnue" \
             --b ./target/release/sirko --games "${GAMES}" --tc 8+0.08 --seed "${SHARD}" | tee match.txt
           grep "^\[" match.txt | tail -n 1 >"result-${SHARD}.txt"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: result-${{ matrix.shard }}
           path: result-${{ matrix.shard }}.txt
@@ -157,7 +157,7 @@ jobs:
     if: always() && needs.match.result == 'success'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: result-*
           merge-multiple: true
