@@ -128,6 +128,7 @@ fn play_game(
         return Vec::new();
     }
     shared.tt.clear();
+    shared.clear_heuristics();
     let mut samples: Vec<(Sample, u16)> = Vec::new();
     let mut win_streak = 0;
     let mut draw_streak = 0;

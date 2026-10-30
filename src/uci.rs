@@ -285,6 +285,7 @@ impl Engine {
             Some("ucinewgame") => {
                 self.stop();
                 self.shared.tt.clear();
+                self.shared.clear_heuristics();
             }
             Some("setoption") => self.setoption(line),
             Some("position") => {
