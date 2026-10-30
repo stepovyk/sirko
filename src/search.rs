@@ -217,6 +217,18 @@ struct Worker<'a> {
     lmr: Box<[[i32; 64]; 64]>,
     /// Накопичувачі мережі на кожну глибину: [глибина][бік][нейрон].
     acc: Vec<i16>,
+    /// Відкладені оновлення накопичувачів: рахуються, лише коли на цій глибині потрібна оцінка.
+    acc_delta: Box<[AccDelta; MAX_PLY + 8]>,
+}
+
+/// Зміна ознак мережі від ходу, що привів на цю глибину (для обох боків).
+#[derive(Clone, Copy, Default)]
+struct AccDelta {
+    ready: bool,
+    adds: [[usize; 2]; 2],
+    subs: [[usize; 2]; 2],
+    na: usize,
+    ns: usize,
 }
 
 pub struct Report {
@@ -295,6 +307,7 @@ impl<'a> Worker<'a> {
                     .map(|n| (MAX_PLY + 8) * 2 * n.hidden)
                     .unwrap_or(0)
             ],
+            acc_delta: Box::new([AccDelta::default(); MAX_PLY + 8]),
         }
     }
 
@@ -306,83 +319,104 @@ impl<'a> Worker<'a> {
             net.accumulate(p, &mut acc);
             self.acc[..h].copy_from_slice(&acc[0]);
             self.acc[h..2 * h].copy_from_slice(&acc[1]);
+            self.acc_delta[0].ready = true;
         }
     }
 
-    /// Накопичувачі глибини ply + 1 після ходу m з позиції p (глибини ply); нульовий хід – копія.
+    /// Запам'ятовує, як зміняться накопичувачі глибини ply + 1 після ходу m з позиції p
+    /// (глибини ply); нульовий хід нічого не змінює. Рахує їх лише acc_ready, коли треба.
     fn acc_push(&mut self, p: &Position, m: Move, ply: usize) {
-        let Some(net) = self.shared.net else { return };
-        let h = net.hidden;
-        let (lo, hi) = self.acc.split_at_mut((ply + 1) * 2 * h);
-        let src = &lo[ply * 2 * h..];
-        let dst = &mut hi[..2 * h];
-        if m.is_none() {
-            dst.copy_from_slice(src);
+        if self.shared.net.is_none() {
             return;
         }
-        let us = p.side;
-        let (from, to) = (m.from(), m.to());
-        let piece = p.piece_at(from);
-        let mut adds: [(u8, Square); 2] = [(NO_PIECE, 0); 2];
-        let mut subs: [(u8, Square); 2] = [(NO_PIECE, 0); 2];
-        let (mut na, mut ns) = (0, 0);
-        if m.is_castle() {
-            let kingside = to > from;
-            let (kto, rto) = if kingside {
-                (relative_sq(us, 6), relative_sq(us, 5))
-            } else {
-                (relative_sq(us, 2), relative_sq(us, 3))
-            };
-            subs[0] = (piece, from);
-            subs[1] = (p.piece_at(to), to);
-            adds[0] = (piece, kto);
-            adds[1] = (p.piece_at(to), rto);
-            na = 2;
-            ns = 2;
-        } else {
-            subs[ns] = (piece, from);
-            ns += 1;
-            adds[na] = (
-                if m.is_promo() {
-                    piece_of(us, m.promo_kind())
+        let mut d = AccDelta::default();
+        if !m.is_none() {
+            let us = p.side;
+            let (from, to) = (m.from(), m.to());
+            let piece = p.piece_at(from);
+            let mut adds: [(u8, Square); 2] = [(NO_PIECE, 0); 2];
+            let mut subs: [(u8, Square); 2] = [(NO_PIECE, 0); 2];
+            if m.is_castle() {
+                let kingside = to > from;
+                let (kto, rto) = if kingside {
+                    (relative_sq(us, 6), relative_sq(us, 5))
                 } else {
-                    piece
-                },
-                to,
-            );
-            na += 1;
-            if m.is_ep() {
-                let cap = if us == WHITE { to - 8 } else { to + 8 };
-                subs[ns] = (p.piece_at(cap), cap);
-                ns += 1;
-            } else if p.piece_at(to) != NO_PIECE {
-                subs[ns] = (p.piece_at(to), to);
-                ns += 1;
+                    (relative_sq(us, 2), relative_sq(us, 3))
+                };
+                subs[0] = (piece, from);
+                subs[1] = (p.piece_at(to), to);
+                adds[0] = (piece, kto);
+                adds[1] = (p.piece_at(to), rto);
+                d.na = 2;
+                d.ns = 2;
+            } else {
+                subs[0] = (piece, from);
+                d.ns = 1;
+                adds[0] = (
+                    if m.is_promo() {
+                        piece_of(us, m.promo_kind())
+                    } else {
+                        piece
+                    },
+                    to,
+                );
+                d.na = 1;
+                if m.is_ep() {
+                    let cap = if us == WHITE { to - 8 } else { to + 8 };
+                    subs[1] = (p.piece_at(cap), cap);
+                    d.ns = 2;
+                } else if p.piece_at(to) != NO_PIECE {
+                    subs[1] = (p.piece_at(to), to);
+                    d.ns = 2;
+                }
+            }
+            for persp in 0..2 {
+                for (f, &(pc, sq)) in d.adds[persp].iter_mut().zip(&adds[..d.na]) {
+                    *f = feature(persp, pc, sq);
+                }
+                for (f, &(pc, sq)) in d.subs[persp].iter_mut().zip(&subs[..d.ns]) {
+                    *f = feature(persp, pc, sq);
+                }
             }
         }
-        for persp in 0..2 {
-            let mut a = [0usize; 2];
-            let mut r = [0usize; 2];
-            for i in 0..na {
-                a[i] = feature(persp, adds[i].0, adds[i].1);
+        self.acc_delta[ply + 1] = d;
+    }
+
+    /// Дораховує відкладені накопичувачі від найближчої готової глибини до ply.
+    #[inline(always)]
+    fn acc_ready(&mut self, ply: usize) {
+        if self.acc_delta[ply].ready {
+            return;
+        }
+        let Some(net) = self.shared.net else { return };
+        let h = net.hidden;
+        let mut from = ply;
+        while !self.acc_delta[from].ready {
+            from -= 1;
+        }
+        for k in from + 1..=ply {
+            let d = self.acc_delta[k];
+            let (lo, hi) = self.acc.split_at_mut(k * 2 * h);
+            let src = &lo[(k - 1) * 2 * h..];
+            let dst = &mut hi[..2 * h];
+            for persp in 0..2 {
+                net.update(
+                    &src[persp * h..(persp + 1) * h],
+                    &mut dst[persp * h..(persp + 1) * h],
+                    &d.adds[persp][..d.na],
+                    &d.subs[persp][..d.ns],
+                );
             }
-            for i in 0..ns {
-                r[i] = feature(persp, subs[i].0, subs[i].1);
-            }
-            net.update(
-                &src[persp * h..(persp + 1) * h],
-                &mut dst[persp * h..(persp + 1) * h],
-                &a[..na],
-                &r[..ns],
-            );
+            self.acc_delta[k].ready = true;
         }
     }
 
     /// Статична оцінка: мережа або ручна; ближче до правила 50 ходів – ближче до нуля.
     #[inline(always)]
-    fn static_eval(&self, p: &Position, ply: usize) -> i32 {
+    fn static_eval(&mut self, p: &Position, ply: usize) -> i32 {
         let v = match self.shared.net {
             Some(net) => {
+                self.acc_ready(ply);
                 let h = net.hidden;
                 let base = ply * 2 * h;
                 let (white, black) = (&self.acc[base..base + h], &self.acc[base + h..base + 2 * h]);
@@ -1227,7 +1261,8 @@ pub fn think(
 mod tests {
     use super::*;
 
-    /// Накопичувачі, оновлені ходами, збігаються з перерахованими з нуля (усі види ходів).
+    /// Накопичувачі, оновлені ходами (зокрема відкладено), збігаються з перерахованими з нуля
+    /// (усі види ходів).
     #[test]
     fn incremental_accumulator() {
         crate::bitboard::init();
@@ -1256,6 +1291,10 @@ mod tests {
                 let m = moves.moves[(seed % moves.len as u64) as usize];
                 w.acc_push(&p, m, ply);
                 p = p.make(m);
+                // Оцінка – не на кожній глибині: відкладені оновлення мусять дорахуватися за кілька ходів.
+                if seed % 3 != 0 {
+                    continue;
+                }
                 assert_eq!(
                     w.static_eval(&p, ply + 1),
                     net.evaluate(&p) * (200 - p.halfmove.min(100) as i32) / 200,
