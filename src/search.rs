@@ -206,6 +206,8 @@ struct Worker<'a> {
     /// Скільки ключів з keys – з історії партії (до кореня пошуку).
     root_len: usize,
     killers: [[Move; 2]; MAX_PLY + 4],
+    /// Скільки подвійних продовжень на шляху від кореня.
+    dext: [u8; MAX_PLY + 4],
     h: MutexGuard<'a, Box<Heuristics>>,
     stack_move: [Move; MAX_PLY + 4],
     stack_piece: [u8; MAX_PLY + 4],
@@ -278,6 +280,7 @@ impl<'a> Worker<'a> {
             since_null,
             keys,
             killers: [[Move::NONE; 2]; MAX_PLY + 4],
+            dext: [0; MAX_PLY + 4],
             h: shared.heuristics[id]
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()),
@@ -895,9 +898,16 @@ impl<'a> Worker<'a> {
                     return 0;
                 }
                 if s < s_beta {
-                    ext = 1;
+                    // Решта ходів набагато гірші – дивимося ще глибше, але не без кінця.
+                    ext = if !pv_node && s < s_beta - 20 && self.dext[ply] < 8 {
+                        2
+                    } else {
+                        1
+                    };
                 } else if s_beta >= beta {
                     return s_beta; // кілька ходів б'ють beta: відсікаємо одразу
+                } else if tt_score >= beta || cut {
+                    ext = -1; // хід не єдиний: можна й мілкіше
                 }
             }
 
@@ -906,6 +916,7 @@ impl<'a> Worker<'a> {
             self.acc_push(p, m, ply);
             self.push(ply, m, piece, child.key);
             let new_depth = depth - 1 + ext;
+            self.dext[ply + 1] = self.dext[ply] + (ext == 2) as u8;
             let mut score;
             if legal == 1 {
                 score = -self.negamax(&child, -beta, -alpha, new_depth, ply + 1, false, Move::NONE);
