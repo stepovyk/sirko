@@ -10,7 +10,7 @@ use crate::see::see_ge;
 use crate::tt::*;
 use crate::types::*;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 pub const INF: i32 = 32001;
@@ -42,6 +42,29 @@ pub struct Shared {
     start_us: AtomicU64,
     /// Нейромережа оцінки (None – ручна оцінка).
     pub net: Option<&'static Network>,
+    /// Таблиці історії кожного потоку: живуть від ходу до ходу, чистяться з новою партією.
+    heuristics: Vec<Mutex<Box<Heuristics>>>,
+}
+
+/// Чого пошук навчився про ходи: історія тихих ходів, контрходи, продовження й взяття.
+struct Heuristics {
+    history: [[[i32; 64]; 64]; 2],
+    counter: [[Move; 64]; 12],
+    /// Історія продовжень: [фігура й поле попереднього ходу][фігура й поле цього ходу] (для 1 і 2 ходів тому).
+    cont: Vec<i32>,
+    /// Історія взять: [фігура][поле][хто взятий].
+    capture_hist: [[[i32; 6]; 64]; 12],
+}
+
+impl Heuristics {
+    fn new() -> Box<Heuristics> {
+        Box::new(Heuristics {
+            history: [[[0; 64]; 64]; 2],
+            counter: [[Move::NONE; 64]; 12],
+            cont: vec![0; 12 * 64 * 12 * 64],
+            capture_hist: [[[0; 6]; 64]; 12],
+        })
+    }
 }
 
 impl Shared {
@@ -51,6 +74,9 @@ impl Shared {
             stop: AtomicBool::new(false),
             pondering: AtomicBool::new(false),
             nodes: (0..threads.max(1)).map(|_| AtomicU64::new(0)).collect(),
+            heuristics: (0..threads.max(1))
+                .map(|_| Mutex::new(Heuristics::new()))
+                .collect(),
             base: Instant::now(),
             start_us: AtomicU64::new(0),
             net: None,
@@ -75,6 +101,13 @@ impl Shared {
     fn elapsed(&self) -> Duration {
         let now = self.base.elapsed().as_micros() as u64;
         Duration::from_micros(now.saturating_sub(self.start_us.load(Ordering::Relaxed)))
+    }
+
+    /// Нова партія: досвід минулої не переносимо.
+    pub fn clear_heuristics(&self) {
+        for h in &self.heuristics {
+            **h.lock().unwrap_or_else(|e| e.into_inner()) = *Heuristics::new();
+        }
     }
 
     pub fn total_nodes(&self) -> u64 {
@@ -173,12 +206,7 @@ struct Worker<'a> {
     /// Скільки ключів з keys – з історії партії (до кореня пошуку).
     root_len: usize,
     killers: [[Move; 2]; MAX_PLY + 4],
-    history: Box<[[[i32; 64]; 64]; 2]>,
-    counter: Box<[[Move; 64]; 12]>,
-    /// Історія продовжень: [фігура й поле попереднього ходу][фігура й поле цього ходу] (для 1 і 2 ходів тому).
-    cont: Vec<i32>,
-    /// Історія взять: [фігура][поле][хто взятий].
-    capture_hist: Box<[[[i32; 6]; 64]; 12]>,
+    h: MutexGuard<'a, Box<Heuristics>>,
     stack_move: [Move; MAX_PLY + 4],
     stack_piece: [u8; MAX_PLY + 4],
     eval_stack: [i32; MAX_PLY + 4],
@@ -250,10 +278,9 @@ impl<'a> Worker<'a> {
             since_null,
             keys,
             killers: [[Move::NONE; 2]; MAX_PLY + 4],
-            history: Box::new([[[0; 64]; 64]; 2]),
-            counter: Box::new([[Move::NONE; 64]; 12]),
-            cont: vec![0; 12 * 64 * 12 * 64],
-            capture_hist: Box::new([[[0; 6]; 64]; 12]),
+            h: shared.heuristics[id]
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
             stack_move: [Move::NONE; MAX_PLY + 4],
             stack_piece: [NO_PIECE; MAX_PLY + 4],
             eval_stack: [0; MAX_PLY + 4],
@@ -442,7 +469,7 @@ impl<'a> Worker<'a> {
             NO_PIECE
         };
         let countermove = if !prev.is_none() && prev_piece != NO_PIECE {
-            self.counter[prev_piece as usize][prev.to() as usize]
+            self.h.counter[prev_piece as usize][prev.to() as usize]
         } else {
             Move::NONE
         };
@@ -462,7 +489,7 @@ impl<'a> Worker<'a> {
                     0
                 };
                 let attacker = kind_of(p.piece_at(m.from()));
-                let hist = self.capture_hist[p.piece_at(m.from()) as usize][m.to() as usize]
+                let hist = self.h.capture_hist[p.piece_at(m.from()) as usize][m.to() as usize]
                     [Self::victim(p, m)];
                 let base = victim_value * 10 + promo - SEE_VALUE[attacker] / 10 + hist / 16;
                 if see_ge(p, m, -50) {
@@ -483,7 +510,7 @@ impl<'a> Worker<'a> {
     }
 
     fn update_history(&mut self, side: usize, m: Move, bonus: i32) {
-        let h = &mut self.history[side][m.from() as usize][m.to() as usize];
+        let h = &mut self.h.history[side][m.from() as usize][m.to() as usize];
         *h += bonus - *h * bonus.abs() / HISTORY_MAX;
     }
 
@@ -509,9 +536,9 @@ impl<'a> Worker<'a> {
     #[inline(always)]
     fn quiet_score(&self, p: &Position, m: Move, ply: usize) -> i32 {
         let piece = p.piece_at(m.from());
-        let mut v = self.history[p.side][m.from() as usize][m.to() as usize];
+        let mut v = self.h.history[p.side][m.from() as usize][m.to() as usize];
         for i in self.cont_slots(ply, piece, m.to()).into_iter().flatten() {
-            v += self.cont[i];
+            v += self.h.cont[i];
         }
         v
     }
@@ -520,7 +547,7 @@ impl<'a> Worker<'a> {
         self.update_history(p.side, m, bonus);
         let piece = p.piece_at(m.from());
         for i in self.cont_slots(ply, piece, m.to()).into_iter().flatten() {
-            let h = &mut self.cont[i];
+            let h = &mut self.h.cont[i];
             *h += bonus - *h * bonus.abs() / HISTORY_MAX;
         }
     }
@@ -535,7 +562,7 @@ impl<'a> Worker<'a> {
     }
 
     fn update_capture(&mut self, p: &Position, m: Move, bonus: i32) {
-        let h = &mut self.capture_hist[p.piece_at(m.from()) as usize][m.to() as usize]
+        let h = &mut self.h.capture_hist[p.piece_at(m.from()) as usize][m.to() as usize]
             [Self::victim(p, m)];
         *h += bonus - *h * bonus.abs() / HISTORY_MAX;
     }
@@ -973,7 +1000,7 @@ impl<'a> Worker<'a> {
                                 && self.stack_piece[ply - 1] != NO_PIECE
                             {
                                 let pp = self.stack_piece[ply - 1] as usize;
-                                self.counter[pp][self.stack_move[ply - 1].to() as usize] = m;
+                                self.h.counter[pp][self.stack_move[ply - 1].to() as usize] = m;
                             }
                         }
                         break;
