@@ -821,6 +821,60 @@ impl<'a> Worker<'a> {
                 }
             }
         }
+        // ProbCut: взяття, що з запасом б'є beta на мілкому пошуку, майже напевно б'є й на повному.
+        let pc_beta = beta + 200;
+        if !pv_node
+            && !in_check
+            && excluded.is_none()
+            && depth >= 5
+            && beta.abs() < MATE_BOUND
+            && !tt
+                .map(|e| e.depth >= depth - 3 && score_from_tt(e.score, ply, p.halfmove) < pc_beta)
+                .unwrap_or(false)
+        {
+            let mut list = MoveList::new();
+            p.generate(&mut list, true);
+            let mut scores = [0i32; 256];
+            self.score_moves(p, &list, &mut scores, tt_move, ply);
+            for i in 0..list.len {
+                pick(&mut list, &mut scores, i);
+                let m = list.moves[i];
+                if !p.is_legal(m) || !see_ge(p, m, pc_beta - eval) {
+                    continue;
+                }
+                let child = p.make(m);
+                self.acc_push(p, m, ply);
+                self.push(ply, m, p.piece_at(m.from()), child.key);
+                let mut score = -self.quiescence(&child, -pc_beta, -pc_beta + 1, ply + 1);
+                if score >= pc_beta {
+                    score = -self.negamax(
+                        &child,
+                        -pc_beta,
+                        -pc_beta + 1,
+                        depth - 4,
+                        ply + 1,
+                        !cut,
+                        Move::NONE,
+                    );
+                }
+                self.pop();
+                if self.stopped {
+                    return 0;
+                }
+                if score >= pc_beta {
+                    self.shared.tt.store(
+                        p.key,
+                        m,
+                        score_to_tt(score, ply),
+                        eval,
+                        depth - 3,
+                        BOUND_LOWER,
+                        tt_pv,
+                    );
+                    return score;
+                }
+            }
+        }
         // Без ходу з таблиці на великій глибині – спершу дешевший пошук.
         if tt_move.is_none() && depth >= 5 && (pv_node || cut) {
             depth -= 1;
