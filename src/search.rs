@@ -491,6 +491,7 @@ impl<'a> Worker<'a> {
         scores: &mut [i32; 256],
         tt_move: Move,
         ply: usize,
+        start: usize,
     ) {
         let prev = if ply > 0 {
             self.stack_move[ply - 1]
@@ -507,7 +508,7 @@ impl<'a> Worker<'a> {
         } else {
             Move::NONE
         };
-        for (score, &m) in scores.iter_mut().zip(list.iter()) {
+        for (score, &m) in scores[start..].iter_mut().zip(list.iter().skip(start)) {
             *score = if m == tt_move {
                 1 << 30
             } else if m.is_tactical() {
@@ -663,7 +664,7 @@ impl<'a> Worker<'a> {
         p.generate(&mut list, !in_check);
         let mut scores = [0i32; 256];
         let tt_move = tt.map(|e| e.mv).unwrap_or(Move::NONE);
-        self.score_moves(p, &list, &mut scores, tt_move, ply);
+        self.score_moves(p, &list, &mut scores, tt_move, ply, 0);
         let mut best_move = Move::NONE;
         let mut legal = 0;
         for i in 0..list.len {
@@ -863,7 +864,18 @@ impl<'a> Worker<'a> {
         let mut list = MoveList::new();
         p.generate(&mut list, false);
         let mut scores = [0i32; 256];
-        self.score_moves(p, &list, &mut scores, tt_move, ply);
+        // Хід з таблиці йде першим, а решту оцінюємо лише після нього: часто він одразу дає відсічення.
+        let tt_at = list.iter().position(|&m| m == tt_move);
+        let tt_first = match tt_at {
+            Some(j) => {
+                list.moves.swap(0, j);
+                true
+            }
+            None => {
+                self.score_moves(p, &list, &mut scores, tt_move, ply, 0);
+                false
+            }
+        };
 
         let mut best = -INF;
         let mut best_move = Move::NONE;
@@ -875,7 +887,12 @@ impl<'a> Worker<'a> {
         let mut n_captures = 0;
 
         for i in 0..list.len {
-            pick(&mut list, &mut scores, i);
+            if tt_first && i == 1 {
+                self.score_moves(p, &list, &mut scores, tt_move, ply, 1);
+            }
+            if !(tt_first && i == 0) {
+                pick(&mut list, &mut scores, i);
+            }
             let m = list.moves[i];
             if m == excluded || !p.is_legal(m) {
                 continue;
