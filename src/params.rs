@@ -24,8 +24,8 @@ macro_rules! params {
 
 params! {
     RfpMargin = "rfp_margin", 76, 40, 160;
-    RfpDepth = "rfp_depth", 4, 4, 12;
-    NmpBase = "nmp_base", 5, 2, 5;
+    RfpDepth = "rfp_depth", 4, 2, 12;
+    NmpBase = "nmp_base", 5, 2, 7;
     NmpEvalDiv = "nmp_eval_div", 198, 100, 400;
     LmpBase = "lmp_base", 6, 1, 8;
     FutBase = "fut_base", 90, 30, 200;
