@@ -19,6 +19,7 @@ pub struct Options {
     pub out: String,
 }
 
+/// Межа ваг: після множення на QB = 64 ваги виходу лишаються в ±127, як вимагає рушій.
 const CLIP: f32 = 1.98;
 
 struct Model {

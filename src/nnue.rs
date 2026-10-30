@@ -80,6 +80,10 @@ impl Network {
         let w1 = take(INPUTS * hidden);
         let b1 = take(hidden);
         let w2 = take(buckets * 2 * hidden);
+        // Вихід множить c·w у 16 бітах (див. output), тож ваги виходу мусять бути в межах ±127.
+        if let Some(w) = w2.iter().find(|w| w.abs() > 127) {
+            return Err(format!("вага виходу {w} поза межами ±127"));
+        }
         let start = need - 4 * buckets;
         let b2 = data[start..]
             .chunks_exact(4)
@@ -128,18 +132,43 @@ impl Network {
     }
 
     /// Накопичувач після ходу: копія попереднього, мінус зняті ознаки, плюс додані.
+    /// Звичайний хід, взяття й рокіровка – за один прохід пам'яттю.
     #[inline(always)]
     pub fn update(&self, src: &[i16], dst: &mut [i16], adds: &[usize], subs: &[usize]) {
         let h = self.hidden;
-        dst.copy_from_slice(src);
-        for &f in adds {
-            for (x, w) in dst.iter_mut().zip(&self.w1[f * h..(f + 1) * h]) {
-                *x += *w;
+        let row = |f: usize| &self.w1[f * h..(f + 1) * h];
+        match (adds, subs) {
+            (&[a], &[s]) => {
+                let (wa, ws) = (row(a), row(s));
+                for (((d, &x), &pa), &ms) in dst.iter_mut().zip(src).zip(wa).zip(ws) {
+                    *d = x + pa - ms;
+                }
             }
-        }
-        for &f in subs {
-            for (x, w) in dst.iter_mut().zip(&self.w1[f * h..(f + 1) * h]) {
-                *x -= *w;
+            (&[a], &[s1, s2]) => {
+                let (wa, w1, w2) = (row(a), row(s1), row(s2));
+                for ((((d, &x), &pa), &m1), &m2) in dst.iter_mut().zip(src).zip(wa).zip(w1).zip(w2)
+                {
+                    *d = x + pa - m1 - m2;
+                }
+            }
+            (&[a1, a2], &[s1, s2]) => {
+                let (p1, p2, m1, m2) = (row(a1), row(a2), row(s1), row(s2));
+                for (i, d) in dst.iter_mut().enumerate() {
+                    *d = src[i] + p1[i] + p2[i] - m1[i] - m2[i];
+                }
+            }
+            _ => {
+                dst.copy_from_slice(src);
+                for &f in adds {
+                    for (x, w) in dst.iter_mut().zip(row(f)) {
+                        *x += *w;
+                    }
+                }
+                for &f in subs {
+                    for (x, w) in dst.iter_mut().zip(row(f)) {
+                        *x -= *w;
+                    }
+                }
             }
         }
     }
@@ -152,21 +181,16 @@ impl Network {
         let mut sum: i64 = 0;
         for (side, acc) in [us, them].into_iter().enumerate() {
             let w = &w2[side * h..(side + 1) * h];
-            // Блоками по 16: кожен добуток не більший за 255·255·127, тож блок вміщається в i32,
-            // і компілятор рахує його векторно.
-            let mut blocks = acc.chunks_exact(16).zip(w.chunks_exact(16));
-            for (cv, cw) in &mut blocks {
+            // Ваги виходу тренер обрізає до ±127, тож c·w (c ≤ 255) вміщається в i16, а множення
+            // ще на c з попарним додаванням процесор робить однією командою (pmaddwd).
+            // Блок у 128 нейронів не переповнює i32.
+            for (cv, cw) in acc.chunks(128).zip(w.chunks(128)) {
                 let mut lane: i32 = 0;
-                for k in 0..16 {
-                    let c = (cv[k] as i32).clamp(0, QA);
-                    lane += c * cw[k] as i32 * c;
+                for (&v, &wt) in cv.iter().zip(cw) {
+                    let c = v.clamp(0, QA as i16);
+                    lane += (c * wt) as i32 * c as i32;
                 }
                 sum += lane as i64;
-            }
-            let tail = h - h % 16;
-            for (&v, &wt) in acc[tail..].iter().zip(&w[tail..]) {
-                let c = (v as i32).clamp(0, QA);
-                sum += (c * wt as i32) as i64 * c as i64;
             }
         }
         let out = sum / QA as i64 + self.b2[b] as i64;
