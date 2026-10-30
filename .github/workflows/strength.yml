@@ -28,7 +28,7 @@ jobs:
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Збирання Сірка й завантаження Stockfish
@@ -58,7 +58,7 @@ jobs:
             --b-opt UCI_LimitStrength=true --b-opt "UCI_Elo=${ELO}" \
             --games "${GAMES}" --tc "${TC}" --seed "${{ github.run_number }}${SHARD}" | tee match.txt
           grep "^\[" match.txt | tail -n 1 >"result-${SHARD}.txt"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: result-${{ matrix.shard }}
           path: result-${{ matrix.shard }}.txt
@@ -67,7 +67,7 @@ jobs:
     needs: match
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: result-*
           merge-multiple: true

@@ -25,7 +25,7 @@ jobs:
     steps:
       - name: Що оновлюється
         id: meta
-        uses: dependabot/fetch-metadata@v2
+        uses: dependabot/fetch-metadata@v3
 
       - name: Злиття після зелених перевірок
         if: steps.meta.outputs.update-type != 'version-update:semver-major' || steps.meta.outputs.package-ecosystem == 'github_actions'
