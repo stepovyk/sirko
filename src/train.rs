@@ -190,7 +190,12 @@ fn step(m: &Model, s: &Sample, wdl: f32, grad: Option<&mut [f32]>, acc: &mut [f3
 }
 
 fn load(paths: &[String]) -> Vec<Sample> {
-    let mut out = Vec::new();
+    // Пам'ять під усі зразки – одразу: без подвоєння вектора сотні мільйонів позицій вміщаються в RAM.
+    let total: u64 = paths
+        .iter()
+        .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+        .sum();
+    let mut out = Vec::with_capacity((total / RECORD as u64) as usize);
     for path in paths {
         let mut buf = Vec::new();
         std::fs::File::open(path)
