@@ -1022,15 +1022,17 @@ impl<'a> Worker<'a> {
                     Move::NONE,
                 );
                 if score > alpha && r > 0 {
-                    score = -self.negamax(
-                        &child,
-                        -alpha - 1,
-                        -alpha,
-                        new_depth,
-                        ply + 1,
-                        !cut,
-                        Move::NONE,
-                    );
+                    // Повторний пошук глибший, якщо хід явно кращий, і мілкіший, якщо ледь кращий.
+                    let mut d = new_depth;
+                    if score > best + 43 + 2 * new_depth {
+                        d += 1;
+                    } else if score < best + 9 {
+                        d -= 1;
+                    }
+                    if d > new_depth - r {
+                        score =
+                            -self.negamax(&child, -alpha - 1, -alpha, d, ply + 1, !cut, Move::NONE);
+                    }
                 }
                 if score > alpha && score < beta {
                     score =
