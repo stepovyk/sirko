@@ -625,7 +625,7 @@ impl<'a> Worker<'a> {
     fn corrected(&self, p: &Position, raw: i32) -> i32 {
         let [a, b, c] = Self::corr_slots(p);
         let h = &self.h;
-        let corr = (2 * h.pawn_corr[a] + h.nonpawn_corr[b] + h.nonpawn_corr[c]) / (4 * CORR_GRAIN);
+        let corr = (2 * h.pawn_corr[a] + h.nonpawn_corr[b] + h.nonpawn_corr[c]) / (2 * CORR_GRAIN);
         (raw + corr).clamp(-MATE_BOUND + 1, MATE_BOUND - 1)
     }
 
