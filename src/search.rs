@@ -879,6 +879,16 @@ impl<'a> Worker<'a> {
             {
                 return eval;
             }
+            // Бритва: оцінка безнадійно нижча за alpha – досить перевірити взяття.
+            if depth <= 3 && eval + 400 + 250 * depth * depth < alpha && alpha.abs() < MATE_BOUND {
+                let s = self.quiescence(p, alpha, alpha + 1, ply);
+                if self.stopped {
+                    return 0;
+                }
+                if s <= alpha {
+                    return s;
+                }
+            }
             // Нульовий хід: навіть пропустивши хід, ми не нижче beta.
             if depth >= 3
                 && eval >= beta
