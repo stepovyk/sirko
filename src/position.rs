@@ -73,6 +73,8 @@ pub struct Position {
     pub fullmove: u16,
     pub key: u64,
     pub pawn_key: u64,
+    /// Ключ фігур кожного кольору без пішаків (для корекції оцінки).
+    pub nonpawn_key: [u64; 2],
     pub checkers: Bitboard,
     pub chess960: bool,
     /// Поле тури для кожного права (WK, WQ, BK, BQ по порядку бітів).
@@ -155,6 +157,9 @@ impl Position {
         if k == PAWN || k == KING {
             self.pawn_key ^= zobrist().piece[piece as usize][sq as usize];
         }
+        if k != PAWN {
+            self.nonpawn_key[c] ^= zobrist().piece[piece as usize][sq as usize];
+        }
         self.phase += PHASE_WEIGHT[k];
     }
 
@@ -167,6 +172,9 @@ impl Position {
         self.key ^= zobrist().piece[piece as usize][sq as usize];
         if k == PAWN || k == KING {
             self.pawn_key ^= zobrist().piece[piece as usize][sq as usize];
+        }
+        if k != PAWN {
+            self.nonpawn_key[c] ^= zobrist().piece[piece as usize][sq as usize];
         }
         self.phase -= PHASE_WEIGHT[k];
         piece
@@ -230,6 +238,7 @@ impl Position {
             fullmove: 1,
             key: 0,
             pawn_key: 0,
+            nonpawn_key: [0; 2],
             checkers: 0,
             chess960: false,
             castle_rook: [7, 0, 63, 56],
