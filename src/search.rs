@@ -952,6 +952,15 @@ impl<'a> Worker<'a> {
                     {
                         continue;
                     }
+                    // Тихий хід з дуже поганою історією на малій глибині.
+                    if !pv_node
+                        && !in_check
+                        && depth <= 4
+                        && !is_killer
+                        && self.quiet_score(p, m, ply) < -3000 * depth
+                    {
+                        continue;
+                    }
                     if depth <= 8 && !see_ge(p, m, -get(P::SeeQuiet) * depth) {
                         continue;
                     }
