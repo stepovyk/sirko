@@ -824,6 +824,7 @@ impl<'a> Worker<'a> {
         };
         let tt_move = tt.map(|e| e.mv).unwrap_or(Move::NONE);
         let tt_pv = pv_node || tt.map(|e| e.pv).unwrap_or(false);
+        let tt_capture = !tt_move.is_none() && tt_move.is_tactical();
         if let Some(e) = tt {
             let s = score_from_tt(e.score, ply, p.halfmove);
             if !pv_node
@@ -1008,6 +1009,8 @@ impl<'a> Worker<'a> {
                     r -= child.in_check() as i32;
                     if quiet {
                         r -= self.quiet_score(p, m, ply) / get(P::LmrHistDiv);
+                        // Хід з таблиці – взяття: тихі ходи тут навряд чи кращі.
+                        r += tt_capture as i32;
                     }
                     r -= tt_pv as i32;
                     r = r.clamp(0, new_depth - 1);
