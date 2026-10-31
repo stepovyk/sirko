@@ -834,6 +834,14 @@ impl<'a> Worker<'a> {
                     || (e.bound == BOUND_LOWER && s >= beta)
                     || (e.bound == BOUND_UPPER && s <= alpha))
             {
+                // Тихий хід з таблиці знову дав відсічення – історія про це знає.
+                if s >= beta && !tt_move.is_none() && !tt_move.is_tactical() {
+                    let pc = p.piece_at(tt_move.from());
+                    if pc != NO_PIECE && color_of(pc) == p.side {
+                        let bonus = (depth * depth * get(P::HistMult)).min(get(P::HistMax));
+                        self.update_quiet(p, tt_move, ply, bonus);
+                    }
+                }
                 return s;
             }
         }
