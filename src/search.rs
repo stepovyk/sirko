@@ -50,7 +50,7 @@ pub struct Shared {
 struct Heuristics {
     history: [[[i32; 64]; 64]; 2],
     counter: [[Move; 64]; 12],
-    /// Історія продовжень: [фігура й поле попереднього ходу][фігура й поле цього ходу] (для 1 і 2 ходів тому).
+    /// Історія продовжень: [фігура й поле попереднього ходу][фігура й поле цього ходу] (для 1, 2 і 4 ходів тому).
     cont: Vec<i32>,
     /// Історія взять: [фігура][поле][хто взятий].
     capture_hist: [[[i32; 6]; 64]; 12],
@@ -560,9 +560,9 @@ impl<'a> Worker<'a> {
 
     /// Індекси історії продовжень для ходу (piece, to) щодо ходів 1 і 2 півходи тому.
     #[inline(always)]
-    fn cont_slots(&self, ply: usize, piece: u8, to: Square) -> [Option<usize>; 2] {
-        let mut out = [None, None];
-        for (k, back) in [1usize, 2].into_iter().enumerate() {
+    fn cont_slots(&self, ply: usize, piece: u8, to: Square) -> [Option<usize>; 3] {
+        let mut out = [None, None, None];
+        for (k, back) in [1usize, 2, 4].into_iter().enumerate() {
             if ply >= back {
                 let (pm, pp) = (self.stack_move[ply - back], self.stack_piece[ply - back]);
                 if !pm.is_none() && pp != NO_PIECE {
