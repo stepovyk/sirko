@@ -54,6 +54,10 @@ struct Heuristics {
     cont: Vec<i32>,
     /// Історія взять: [фігура][поле][хто взятий].
     capture_hist: [[[i32; 6]; 64]; 12],
+    /// Корекція статичної оцінки за структурою пішаків: [черга][ключ пішаків].
+    pawn_corr: Vec<i32>,
+    /// Корекція за фігурами кожного кольору: [черга][колір][ключ фігур].
+    nonpawn_corr: Vec<i32>,
 }
 
 impl Heuristics {
@@ -63,6 +67,8 @@ impl Heuristics {
             counter: [[Move::NONE; 64]; 12],
             cont: vec![0; 12 * 64 * 12 * 64],
             capture_hist: [[[0; 6]; 64]; 12],
+            pawn_corr: vec![0; 2 * CORR_SIZE],
+            nonpawn_corr: vec![0; 4 * CORR_SIZE],
         })
     }
 }
@@ -191,6 +197,10 @@ impl<'a> Clock<'a> {
 }
 
 const HISTORY_MAX: i32 = 16384;
+/// Таблиці корекції оцінки: розмір, точність (частки сантипішака) і межа поправки.
+const CORR_SIZE: usize = 16384;
+const CORR_GRAIN: i32 = 256;
+const CORR_MAX: i32 = 64 * CORR_GRAIN;
 
 struct Worker<'a> {
     id: usize,
@@ -601,6 +611,36 @@ impl<'a> Worker<'a> {
         *h += bonus - *h * bonus.abs() / HISTORY_MAX;
     }
 
+    fn corr_slots(p: &Position) -> [usize; 3] {
+        let i = |k: u64| (k as usize) & (CORR_SIZE - 1);
+        let s = p.side;
+        [
+            s * CORR_SIZE + i(p.pawn_key),
+            (s * 2) * CORR_SIZE + i(p.nonpawn_key[WHITE]),
+            (s * 2 + 1) * CORR_SIZE + i(p.nonpawn_key[BLACK]),
+        ]
+    }
+
+    /// Статична оцінка з поправкою на те, як пошук досі розходився з мережею в схожих позиціях.
+    fn corrected(&self, p: &Position, raw: i32) -> i32 {
+        let [a, b, c] = Self::corr_slots(p);
+        let h = &self.h;
+        let corr = (2 * h.pawn_corr[a] + h.nonpawn_corr[b] + h.nonpawn_corr[c]) / (4 * CORR_GRAIN);
+        (raw + corr).clamp(-MATE_BOUND + 1, MATE_BOUND - 1)
+    }
+
+    fn update_corr(&mut self, p: &Position, depth: i32, diff: i32) {
+        let target = diff.clamp(-CORR_MAX / CORR_GRAIN, CORR_MAX / CORR_GRAIN) * CORR_GRAIN;
+        let w = (depth + 1).min(16);
+        let [a, b, c] = Self::corr_slots(p);
+        let blend = |e: &mut i32| {
+            *e = ((*e * (256 - w) + target * w) / 256).clamp(-CORR_MAX, CORR_MAX);
+        };
+        blend(&mut self.h.pawn_corr[a]);
+        blend(&mut self.h.nonpawn_corr[b]);
+        blend(&mut self.h.nonpawn_corr[c]);
+    }
+
     fn push(&mut self, ply: usize, m: Move, piece: u8, key: u64) {
         self.stack_move[ply] = m;
         self.stack_piece[ply] = piece;
@@ -644,13 +684,15 @@ impl<'a> Worker<'a> {
         }
         let mut best;
         let stand;
+        let mut raw = 0;
         if in_check {
             stand = -INF;
             best = -MATE + ply as i32;
         } else {
-            stand = tt
+            raw = tt
                 .map(|e| e.eval)
                 .unwrap_or_else(|| self.static_eval(p, ply));
+            stand = self.corrected(p, raw);
             best = stand;
             if stand >= beta {
                 return stand;
@@ -726,7 +768,7 @@ impl<'a> Worker<'a> {
             p.key,
             best_move,
             score_to_tt(best, ply),
-            if in_check { 0 } else { stand },
+            raw,
             -1,
             bound,
             false,
@@ -795,10 +837,21 @@ impl<'a> Worker<'a> {
             }
         }
 
+        let raw = if in_check {
+            0
+        } else {
+            tt.map(|e| e.eval)
+                .unwrap_or_else(|| self.static_eval(p, ply))
+        };
+        let static_eval = if in_check {
+            -INF
+        } else {
+            self.corrected(p, raw)
+        };
         let eval = if in_check {
             -INF
         } else if let Some(e) = tt {
-            let mut v = e.eval;
+            let mut v = static_eval;
             let s = score_from_tt(e.score, ply, p.halfmove);
             // Оцінка з таблиці точніша за статичну, якщо межа це дозволяє.
             let tighter = (e.bound == BOUND_LOWER && s > v)
@@ -809,7 +862,7 @@ impl<'a> Worker<'a> {
             }
             v
         } else {
-            self.static_eval(p, ply)
+            static_eval
         };
         self.eval_stack[ply] = eval;
         let improving = !in_check && ply >= 2 && eval > self.eval_stack[ply - 2];
@@ -1059,11 +1112,20 @@ impl<'a> Worker<'a> {
             } else {
                 BOUND_UPPER
             };
+            // Пошук розійшовся зі статичною оцінкою: запам'ятовуємо поправку для схожих позицій.
+            if !in_check
+                && (best_move.is_none() || !best_move.is_tactical())
+                && best.abs() < MATE_BOUND
+                && !(bound == BOUND_LOWER && best <= static_eval)
+                && !(bound == BOUND_UPPER && best >= static_eval)
+            {
+                self.update_corr(p, depth, best - raw);
+            }
             self.shared.tt.store(
                 p.key,
                 best_move,
                 score_to_tt(best, ply),
-                if in_check { 0 } else { eval },
+                raw,
                 depth,
                 bound,
                 tt_pv,
