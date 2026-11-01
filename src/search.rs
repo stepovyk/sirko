@@ -1015,7 +1015,8 @@ impl<'a> Worker<'a> {
                     r = self.lmr[depth.min(63) as usize][legal.min(63) as usize];
                     r -= pv_node as i32;
                     r -= is_killer as i32;
-                    r += cut as i32;
+                    // Очікуване відсічення без ходу з таблиці: ще менш імовірно, що хід кращий.
+                    r += cut as i32 * (1 + tt_move.is_none() as i32);
                     r += !improving as i32;
                     r -= child.in_check() as i32;
                     if quiet {
