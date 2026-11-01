@@ -591,8 +591,12 @@ impl<'a> Worker<'a> {
     }
 
     fn update_quiet(&mut self, p: &Position, m: Move, ply: usize, bonus: i32) {
-        self.update_history(p.side, m, bonus);
-        let piece = p.piece_at(m.from());
+        self.update_quiet_by(p.side, p.piece_at(m.from()), m, ply, bonus);
+    }
+
+    /// Те саме для ходу, якого вже немає на дошці: сторона й фігура задані явно.
+    fn update_quiet_by(&mut self, side: usize, piece: u8, m: Move, ply: usize, bonus: i32) {
+        self.update_history(side, m, bonus);
         for i in self.cont_slots(ply, piece, m.to()).into_iter().flatten() {
             let h = &mut self.h.cont[i];
             *h += bonus - *h * bonus.abs() / HISTORY_MAX;
@@ -1119,6 +1123,14 @@ impl<'a> Worker<'a> {
             } else {
                 0
             };
+        }
+        // Усі наші ходи погані: тихий хід суперника, що до цього привів, був добрим.
+        if best <= original_alpha && excluded.is_none() && ply > 0 {
+            let (pm, pp) = (self.stack_move[ply - 1], self.stack_piece[ply - 1]);
+            if !pm.is_none() && pp != NO_PIECE && !pm.is_tactical() {
+                let bonus = (depth * depth * get(P::HistMult)).min(get(P::HistMax));
+                self.update_quiet_by(p.side ^ 1, pp, pm, ply - 1, bonus);
+            }
         }
         if excluded.is_none() {
             let bound = if best >= beta {
