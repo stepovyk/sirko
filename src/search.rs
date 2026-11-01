@@ -1120,6 +1120,10 @@ impl<'a> Worker<'a> {
                 0
             };
         }
+        // Відсічення поза головною лінією: оцінку тягнемо до beta, бо вона часто завищена.
+        if best >= beta && !pv_node && best.abs() < MATE_BOUND && beta.abs() < MATE_BOUND {
+            best = (best * depth + beta) / (depth + 1);
+        }
         if excluded.is_none() {
             let bound = if best >= beta {
                 BOUND_LOWER
