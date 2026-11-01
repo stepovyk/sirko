@@ -220,6 +220,8 @@ struct Worker<'a> {
     stack_move: [Move; MAX_PLY + 4],
     stack_piece: [u8; MAX_PLY + 4],
     eval_stack: [i32; MAX_PLY + 4],
+    /// Скільки подвійних розширень на шляху до цієї глибини (щоб пошук не розростався).
+    dext: [u8; MAX_PLY + 4],
     pv: Box<[[Move; MAX_PLY + 4]; MAX_PLY + 4]>,
     pv_len: [usize; MAX_PLY + 4],
     stopped: bool,
@@ -306,6 +308,7 @@ impl<'a> Worker<'a> {
             stack_move: [Move::NONE; MAX_PLY + 4],
             stack_piece: [NO_PIECE; MAX_PLY + 4],
             eval_stack: [0; MAX_PLY + 4],
+            dext: [0; MAX_PLY + 4],
             pv: Box::new([[Move::NONE; MAX_PLY + 4]; MAX_PLY + 4]),
             pv_len: [0; MAX_PLY + 4],
             stopped: false,
@@ -984,8 +987,15 @@ impl<'a> Worker<'a> {
                 }
                 if s < s_beta {
                     ext = 1;
+                    // Решта ходів набагато гірші: ще на хід глибше.
+                    if !pv_node && s < s_beta - 20 && self.dext[ply] < 6 {
+                        ext = 2;
+                    }
                 } else if s_beta >= beta {
                     return s_beta; // кілька ходів б'ють beta: відсікаємо одразу
+                } else if tt_score >= beta || cut {
+                    // Хід не єдиний, а вузол і так очікує відсічення: дивимося мілкіше.
+                    ext = -1;
                 }
             }
 
@@ -994,6 +1004,7 @@ impl<'a> Worker<'a> {
             self.acc_push(p, m, ply);
             self.push(ply, m, piece, child.key);
             let new_depth = depth - 1 + ext;
+            self.dext[ply + 1] = self.dext[ply] + (ext == 2) as u8;
             let mut score;
             if legal == 1 {
                 score = -self.negamax(&child, -beta, -alpha, new_depth, ply + 1, false, Move::NONE);
