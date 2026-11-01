@@ -16,7 +16,7 @@ on:
         default: "5000"
       hidden:
         description: "Нейронів прихованого шару"
-        default: "256"
+        default: "384"
       epochs:
         description: "Епох навчання"
         default: "12"
