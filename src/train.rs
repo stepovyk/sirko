@@ -13,6 +13,8 @@ pub struct Options {
     pub buckets: usize,
     pub epochs: usize,
     pub batch: usize,
+    /// Скільки зразків тримати в пам'яті одночасно.
+    pub buffer: usize,
     pub lr: f32,
     pub wdl: f32,
     pub threads: usize,
@@ -189,68 +191,54 @@ fn step(m: &Model, s: &Sample, wdl: f32, grad: Option<&mut [f32]>, acc: &mut [f3
     loss
 }
 
-fn load(paths: &[String]) -> Vec<Sample> {
-    // Пам'ять під усі зразки – одразу: без подвоєння вектора сотні мільйонів позицій вміщаються в RAM.
-    let total: u64 = paths
-        .iter()
-        .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
-        .sum();
-    let mut out = Vec::with_capacity((total / RECORD as u64) as usize);
-    for path in paths {
-        let mut buf = Vec::new();
-        std::fs::File::open(path)
-            .and_then(|mut f| f.read_to_end(&mut buf))
-            .unwrap_or_else(|e| panic!("{path}: {e}"));
-        out.extend(buf.chunks_exact(RECORD).map(Sample::from_bytes));
-    }
-    out
+/// Додає до out зразки з файлу: пропустивши skip записів і не більше take.
+fn read_into(path: &str, skip: usize, take: usize, out: &mut Vec<Sample>) {
+    let mut buf = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| {
+            f.take(((skip + take) as u64).saturating_mul(RECORD as u64))
+                .read_to_end(&mut buf)
+        })
+        .unwrap_or_else(|e| panic!("{path}: {e}"));
+    out.extend(
+        buf.chunks_exact(RECORD)
+            .skip(skip)
+            .take(take)
+            .map(Sample::from_bytes),
+    );
 }
 
-pub fn run(o: Options) {
-    let start = Instant::now();
-    let mut data = load(&o.data);
-    let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
-    let mut rnd = move || {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        seed
-    };
-    // Перемішати й відкласти 1% для перевірки.
-    for i in (1..data.len()).rev() {
+fn shuffle<T>(v: &mut [T], rnd: &mut impl FnMut() -> u64) {
+    for i in (1..v.len()).rev() {
         let j = (rnd() % (i as u64 + 1)) as usize;
-        data.swap(i, j);
+        v.swap(i, j);
     }
-    let valid_n = (data.len() / 100).clamp(1, 200_000).min(data.len());
-    let valid: Vec<Sample> = data.drain(..valid_n).collect();
-    eprintln!(
-        "зразків: навчання {}, перевірка {}",
-        data.len(),
-        valid.len()
-    );
+}
 
-    let mut model = Model::new(o.hidden, o.buckets.max(1), 0x1234_5678);
-    let n = Model::len(o.hidden, o.buckets.max(1));
-    let mut m1 = vec![0.0f32; n];
-    let mut m2 = vec![0.0f32; n];
-    let (beta1, beta2, eps) = (0.9f32, 0.999f32, 1e-8f32);
-    let mut t = 0i32;
-    let threads = o.threads.max(1);
-    let mut grads: Vec<Vec<f32>> = (0..threads).map(|_| vec![0.0f32; n]).collect();
-    let steps_per_epoch = data.len().div_ceil(o.batch);
-    let total_steps = steps_per_epoch * o.epochs;
+/// Стан навчання: модель, моменти Adam і буфери градієнтів потоків.
+struct Trainer {
+    model: Model,
+    m1: Vec<f32>,
+    m2: Vec<f32>,
+    grads: Vec<Vec<f32>>,
+    t: i32,
+    step: usize,
+    total_steps: usize,
+}
 
-    for epoch in 0..o.epochs {
-        for i in (1..data.len()).rev() {
-            let j = (rnd() % (i as u64 + 1)) as usize;
-            data.swap(i, j);
-        }
-        let mut train_loss = 0.0f64;
-        for (bi, batch) in data.chunks(o.batch).enumerate() {
+impl Trainer {
+    /// Один прохід по мінівибірках шматка даних; повертає суму втрат.
+    fn train_on(&mut self, data: &[Sample], o: &Options) -> f64 {
+        let (beta1, beta2, eps) = (0.9f32, 0.999f32, 1e-8f32);
+        let threads = self.grads.len();
+        let n = self.m1.len();
+        let mut total = 0.0f64;
+        for batch in data.chunks(o.batch) {
             let chunk = batch.len().div_ceil(threads);
-            let model_ref = &model;
+            let model_ref = &self.model;
             let losses: Vec<f64> = std::thread::scope(|scope| {
-                let handles: Vec<_> = grads
+                let handles: Vec<_> = self
+                    .grads
                     .iter_mut()
                     .zip(batch.chunks(chunk.max(1)))
                     .map(|(g, part)| {
@@ -268,47 +256,120 @@ pub fn run(o: Options) {
                     .map(|h| h.join().expect("потік навчання"))
                     .collect()
             });
-            train_loss += losses.iter().sum::<f64>();
+            total += losses.iter().sum::<f64>();
             let used = batch.len().div_ceil(chunk.max(1));
             // Adam з косинусним спадом кроку.
-            t += 1;
-            let progress = (epoch * steps_per_epoch + bi) as f32 / total_steps as f32;
+            self.t += 1;
+            let progress = (self.step as f32 / self.total_steps.max(1) as f32).min(1.0);
+            self.step += 1;
             let lr = o.lr * (0.05 + 0.95 * 0.5 * (1.0 + (std::f32::consts::PI * progress).cos()));
             let scale = 1.0 / batch.len() as f32;
-            let c1 = 1.0 - beta1.powi(t);
-            let c2 = 1.0 - beta2.powi(t);
+            let c1 = 1.0 - beta1.powi(self.t);
+            let c2 = 1.0 - beta2.powi(self.t);
+            let b2 = self.model.b2();
             for k in 0..n {
                 let mut g = 0.0f32;
-                for gr in grads.iter().take(used) {
+                for gr in self.grads.iter().take(used) {
                     g += gr[k];
                 }
                 g *= scale;
-                m1[k] = beta1 * m1[k] + (1.0 - beta1) * g;
-                m2[k] = beta2 * m2[k] + (1.0 - beta2) * g * g;
-                let upd = lr * (m1[k] / c1) / ((m2[k] / c2).sqrt() + eps);
-                let x = model.p[k] - upd;
-                model.p[k] = if k < model.b2() {
-                    x.clamp(-CLIP, CLIP)
-                } else {
-                    x
-                };
+                self.m1[k] = beta1 * self.m1[k] + (1.0 - beta1) * g;
+                self.m2[k] = beta2 * self.m2[k] + (1.0 - beta2) * g * g;
+                let upd = lr * (self.m1[k] / c1) / ((self.m2[k] / c2).sqrt() + eps);
+                let x = self.model.p[k] - upd;
+                self.model.p[k] = if k < b2 { x.clamp(-CLIP, CLIP) } else { x };
             }
         }
-        let mut acc = vec![0.0f32; 2 * model.h];
+        total
+    }
+}
+
+pub fn run(o: Options) {
+    let start = Instant::now();
+    let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
+    let mut rnd = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    // Розміри файлів; на перевірку – по кілька перших записів з кожного, у навчання вони не йдуть.
+    let files: Vec<(String, usize)> = o
+        .data
+        .iter()
+        .map(|p| {
+            let len = std::fs::metadata(p)
+                .unwrap_or_else(|e| panic!("{p}: {e}"))
+                .len();
+            (p.clone(), (len / RECORD as u64) as usize)
+        })
+        .filter(|(_, n)| *n > 0)
+        .collect();
+    assert!(!files.is_empty(), "немає даних для навчання");
+    let total: usize = files.iter().map(|(_, n)| n).sum();
+    let per_file = (total / 100)
+        .clamp(files.len(), 200_000)
+        .div_ceil(files.len());
+    let skip = |n: usize| per_file.min(n / 2);
+    let mut valid = Vec::new();
+    for (path, n) in &files {
+        read_into(path, 0, skip(*n), &mut valid);
+    }
+    let train_n: usize = files.iter().map(|(_, n)| n - skip(*n)).sum();
+    // Шматок у пам'яті: файли в довільному порядку, усередині шматка – перемішані зразки.
+    let buffer = o.buffer.max(o.batch);
+    eprintln!(
+        "зразків: навчання {train_n}, перевірка {}, файлів {}, шматок до {buffer}",
+        valid.len(),
+        files.len()
+    );
+
+    let h = o.hidden;
+    let b = o.buckets.max(1);
+    let n = Model::len(h, b);
+    let threads = o.threads.max(1);
+    let mut tr = Trainer {
+        model: Model::new(h, b, 0x1234_5678),
+        m1: vec![0.0f32; n],
+        m2: vec![0.0f32; n],
+        grads: (0..threads).map(|_| vec![0.0f32; n]).collect(),
+        t: 0,
+        step: 0,
+        // Неповні мінівибірки в кінці шматків дають кілька зайвих кроків: прогрес обмежено одиницею.
+        total_steps: train_n.div_ceil(o.batch) * o.epochs,
+    };
+    let mut order: Vec<usize> = (0..files.len()).collect();
+
+    for epoch in 0..o.epochs {
+        shuffle(&mut order, &mut rnd);
+        // Шматок може перевищити межу на один файл: місце під це – одразу, без подвоєння вектора.
+        let biggest = files.iter().map(|(_, n)| *n).max().unwrap_or(0);
+        let mut buf: Vec<Sample> = Vec::with_capacity(buffer.min(train_n) + biggest);
+        let mut train_loss = 0.0f64;
+        for (k, &i) in order.iter().enumerate() {
+            let (path, n) = &files[i];
+            read_into(path, skip(*n), *n, &mut buf);
+            if buf.len() >= buffer || k + 1 == order.len() {
+                shuffle(&mut buf, &mut rnd);
+                train_loss += tr.train_on(&buf, &o);
+                buf.clear();
+            }
+        }
+        let mut acc = vec![0.0f32; 2 * tr.model.h];
         let vloss: f64 = valid
             .iter()
-            .map(|s| step(&model, s, o.wdl, None, &mut acc) as f64)
+            .map(|s| step(&tr.model, s, o.wdl, None, &mut acc) as f64)
             .sum::<f64>()
             / valid.len() as f64;
         eprintln!(
             "епоха {}/{}: втрата навчання {:.6}, перевірки {:.6}, {:.0} с",
             epoch + 1,
             o.epochs,
-            train_loss / data.len() as f64,
+            train_loss / train_n as f64,
             vloss,
             start.elapsed().as_secs_f64()
         );
-        std::fs::write(&o.out, model.quantize().to_bytes()).expect("запис мережі");
+        std::fs::write(&o.out, tr.model.quantize().to_bytes()).expect("запис мережі");
     }
 }
 
