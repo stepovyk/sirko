@@ -120,6 +120,9 @@ jobs:
       - name: Збирання
         run: cargo build --release
       - name: Навчання
+        # Мережа пишеться після кожної епохи: якщо час вийде, лишається остання.
+        timeout-minutes: 340
+        continue-on-error: true
         env:
           HIDDEN: ${{ inputs.hidden }}
           EPOCHS: ${{ inputs.epochs }}
@@ -133,6 +136,7 @@ jobs:
           name: net
           path: sirko.nnue
           retention-days: 30
+          if-no-files-found: error
 
   match:
     needs: train

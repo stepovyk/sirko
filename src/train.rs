@@ -191,16 +191,21 @@ fn step(m: &Model, s: &Sample, wdl: f32, grad: Option<&mut [f32]>, acc: &mut [f3
     loss
 }
 
-/// Зразки з файлу, починаючи з запису skip.
-fn read_records(path: &str, skip: usize) -> Vec<Sample> {
+/// Додає до out зразки з файлу: пропустивши skip записів і не більше take.
+fn read_into(path: &str, skip: usize, take: usize, out: &mut Vec<Sample>) {
     let mut buf = Vec::new();
     std::fs::File::open(path)
-        .and_then(|mut f| f.read_to_end(&mut buf))
+        .and_then(|f| {
+            f.take(((skip + take) as u64).saturating_mul(RECORD as u64))
+                .read_to_end(&mut buf)
+        })
         .unwrap_or_else(|e| panic!("{path}: {e}"));
-    buf.chunks_exact(RECORD)
-        .skip(skip)
-        .map(Sample::from_bytes)
-        .collect()
+    out.extend(
+        buf.chunks_exact(RECORD)
+            .skip(skip)
+            .take(take)
+            .map(Sample::from_bytes),
+    );
 }
 
 fn shuffle<T>(v: &mut [T], rnd: &mut impl FnMut() -> u64) {
@@ -305,13 +310,11 @@ pub fn run(o: Options) {
     let per_file = (total / 100)
         .clamp(files.len(), 200_000)
         .div_ceil(files.len());
+    let skip = |n: usize| per_file.min(n / 2);
     let mut valid = Vec::new();
     for (path, n) in &files {
-        let mut v = read_records(path, 0);
-        v.truncate(per_file.min(*n / 2));
-        valid.extend(v);
+        read_into(path, 0, skip(*n), &mut valid);
     }
-    let skip = |n: usize| per_file.min(n / 2);
     let train_n: usize = files.iter().map(|(_, n)| n - skip(*n)).sum();
     // Шматок у пам'яті: файли в довільному порядку, усередині шматка – перемішані зразки.
     let buffer = o.buffer.max(o.batch);
@@ -339,11 +342,13 @@ pub fn run(o: Options) {
 
     for epoch in 0..o.epochs {
         shuffle(&mut order, &mut rnd);
-        let mut buf: Vec<Sample> = Vec::with_capacity(buffer.min(train_n) + 1);
+        // Шматок може перевищити межу на один файл: місце під це – одразу, без подвоєння вектора.
+        let biggest = files.iter().map(|(_, n)| *n).max().unwrap_or(0);
+        let mut buf: Vec<Sample> = Vec::with_capacity(buffer.min(train_n) + biggest);
         let mut train_loss = 0.0f64;
         for (k, &i) in order.iter().enumerate() {
             let (path, n) = &files[i];
-            buf.extend(read_records(path, skip(*n)));
+            read_into(path, skip(*n), *n, &mut buf);
             if buf.len() >= buffer || k + 1 == order.len() {
                 shuffle(&mut buf, &mut rnd);
                 train_loss += tr.train_on(&buf, &o);
