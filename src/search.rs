@@ -880,7 +880,8 @@ impl<'a> Worker<'a> {
                 && eval - get(P::RfpMargin) * (depth - improving as i32) >= beta
                 && eval.abs() < MATE_BOUND
             {
-                return eval;
+                // Не довіряємо оцінці повністю: ближче до beta.
+                return (eval + beta) / 2;
             }
             // Нульовий хід: навіть пропустивши хід, ми не нижче beta.
             if depth >= 3
