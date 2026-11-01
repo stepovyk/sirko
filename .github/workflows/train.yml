@@ -70,7 +70,7 @@ jobs:
         with:
           name: data-${{ matrix.shard }}
           path: data-${{ matrix.shard }}.bin
-          retention-days: 7
+          retention-days: 30
           compression-level: 1
 
   train:
@@ -83,6 +83,15 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v7
+      - name: Місце для даних
+        # Самогра кількох запусків – десятки гігабайтів: кладемо її на більший диск машини.
+        run: |
+          df -h . /mnt || true
+          if [ -d /mnt ] && [ "$(df --output=avail -B1 /mnt | tail -1)" -gt "$(df --output=avail -B1 . | tail -1)" ]; then
+            sudo mkdir -p /mnt/data
+            sudo chown "$(id -u):$(id -g)" /mnt/data
+            ln -s /mnt/data data
+          fi
       - uses: actions/download-artifact@v8
         if: inputs.data_run == ''
         with:
@@ -104,9 +113,9 @@ jobs:
           RUNS: ${{ inputs.extra_runs }}
         run: |
           for id in ${RUNS}; do
-            gh run download "${id}" -R "${GITHUB_REPOSITORY}" -p 'data-*' -D "extra/${id}"
-            mkdir -p data
-            find "extra/${id}" -name '*.bin' | while read -r f; do mv "$f" "data/${id}-$(basename "$f")"; done
+            gh run download "${id}" -R "${GITHUB_REPOSITORY}" -p 'data-*' -D "data/extra-${id}"
+            find "data/extra-${id}" -name '*.bin' | while read -r f; do mv "$f" "data/${id}-$(basename "$f")"; done
+            rm -rf "data/extra-${id}"
           done
       - name: Збирання
         run: cargo build --release
@@ -116,7 +125,8 @@ jobs:
           EPOCHS: ${{ inputs.epochs }}
           BUCKETS: ${{ inputs.buckets }}
         run: |
-          ls -la data
+          ls -la data/
+          df -h data/
           ./target/release/sirko train sirko.nnue "${HIDDEN}" "${EPOCHS}" --batch=16384 --lr=0.001 --wdl=0.4 "--buckets=${BUCKETS}" data/*.bin
       - uses: actions/upload-artifact@v7
         with:

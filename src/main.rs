@@ -70,7 +70,7 @@ fn main() {
             });
         }
         Some("train") => {
-            // train ВИХІД ПРИХОВАНИХ ЕПОХ [--batch=N --lr=X --wdl=X --buckets=N] ДАНІ...
+            // train ВИХІД ПРИХОВАНИХ ЕПОХ [--batch=N --buffer=N --lr=X --wdl=X --buckets=N] ДАНІ...
             let num = |i: usize, d: usize| args.get(i).and_then(|v| v.parse().ok()).unwrap_or(d);
             let flag = |name: &str, d: f64| {
                 args.iter()
@@ -92,6 +92,7 @@ fn main() {
                     .cloned()
                     .collect(),
                 batch: flag("batch", 16384.0) as usize,
+                buffer: flag("buffer", 100_000_000.0) as usize,
                 lr: flag("lr", 0.001) as f32,
                 wdl: flag("wdl", 0.4) as f32,
                 threads: std::thread::available_parallelism()
