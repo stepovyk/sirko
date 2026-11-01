@@ -1230,6 +1230,7 @@ pub fn think(
         let mut score = 0;
         let mut stable = 0;
         let mut last_best = Move::NONE;
+        let mut iter_scores: Vec<i32> = Vec::with_capacity(64);
         for depth in 1..=max_depth {
             // Вікно прагнення навколо минулої оцінки.
             let mut delta = get(P::AspDelta);
@@ -1305,7 +1306,7 @@ pub fn think(
                 }
             }
             // Єдиний хід або стабільний найкращий – менше часу; хитання – більше.
-            let factor = if legal.len == 1 {
+            let mut factor = if legal.len == 1 {
                 0.2
             } else if stable >= 4 {
                 0.7
@@ -1314,6 +1315,14 @@ pub fn think(
             } else {
                 1.0
             };
+            // Оцінка падає порівняно з кількома ітераціями тому – думаємо довше, росте – коротше.
+            iter_scores.push(score);
+            if iter_scores.len() > 4 && score.abs() < MATE_BOUND {
+                let before = iter_scores[iter_scores.len() - 4];
+                if before.abs() < MATE_BOUND {
+                    factor *= (1.0 + (before - score) as f64 / 120.0).clamp(0.8, 1.4);
+                }
+            }
             let pondering = shared.pondering.load(Ordering::Relaxed);
             if !pondering && !limits.infinite && !clock.continue_iterating(factor) {
                 break;
