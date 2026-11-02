@@ -70,7 +70,8 @@ fn main() {
             });
         }
         Some("train") => {
-            // train ВИХІД ПРИХОВАНИХ ЕПОХ [--batch=N --buffer=N --lr=X --wdl=X --buckets=N] ДАНІ...
+            // train ВИХІД ПРИХОВАНИХ ЕПОХ [--batch=N --buffer=N --lr=X --wdl=X --buckets=N
+            //       --state=ФАЙЛ --max-minutes=N] ДАНІ...
             let num = |i: usize, d: usize| args.get(i).and_then(|v| v.parse().ok()).unwrap_or(d);
             let flag = |name: &str, d: f64| {
                 args.iter()
@@ -95,6 +96,13 @@ fn main() {
                 buffer: flag("buffer", 100_000_000.0) as usize,
                 lr: flag("lr", 0.001) as f32,
                 wdl: flag("wdl", 0.4) as f32,
+                state: args
+                    .iter()
+                    .find_map(|a| a.strip_prefix("--state=").map(String::from)),
+                max_minutes: args.iter().find_map(|a| {
+                    a.strip_prefix("--max-minutes=")
+                        .map(|v| v.parse().expect("--max-minutes: число"))
+                }),
                 threads: std::thread::available_parallelism()
                     .map(|n| n.get())
                     .unwrap_or(1),
