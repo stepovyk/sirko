@@ -19,6 +19,10 @@ pub struct Options {
     pub wdl: f32,
     pub threads: usize,
     pub out: String,
+    /// Файл стану: після кожної епохи сюди пишеться все, щоб продовжити навчання в іншому запуску.
+    pub state: Option<String>,
+    /// Не починати нову епоху, якщо вона не встигне за стільки хвилин від старту.
+    pub max_minutes: Option<f64>,
 }
 
 /// Межа ваг: після множення на QB = 64 ваги виходу лишаються в ±127, як вимагає рушій.
@@ -208,11 +212,104 @@ fn read_into(path: &str, skip: usize, take: usize, out: &mut Vec<Sample>) {
     );
 }
 
-fn shuffle<T>(v: &mut [T], rnd: &mut impl FnMut() -> u64) {
+/// xorshift64: стан – одне число, тож його легко зберегти й відновити.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+}
+
+fn shuffle<T>(v: &mut [T], rng: &mut Rng) {
     for i in (1..v.len()).rev() {
-        let j = (rnd() % (i as u64 + 1)) as usize;
+        let j = (rng.next() % (i as u64 + 1)) as usize;
         v.swap(i, j);
     }
+}
+
+const STATE_MAGIC: &[u8; 8] = b"SIRKOST1";
+
+/// Збережене навчання: де зупинилися й усе, що потрібно, щоб продовжити так, ніби перерви не було.
+struct Saved {
+    epochs: usize,
+    done: usize,
+    t: i32,
+    step: usize,
+    total_steps: usize,
+    seed: u64,
+}
+
+fn save_state(path: &str, tr: &Trainer, s: &Saved) {
+    let m = &tr.model;
+    let mut out = Vec::with_capacity(64 + 12 * m.p.len());
+    out.extend_from_slice(STATE_MAGIC);
+    for v in [
+        m.h as u64,
+        m.b as u64,
+        s.epochs as u64,
+        s.done as u64,
+        s.t as u64,
+        s.step as u64,
+        s.total_steps as u64,
+        s.seed,
+    ] {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    for v in [&m.p, &tr.m1, &tr.m2] {
+        for x in v.iter() {
+            out.extend_from_slice(&x.to_le_bytes());
+        }
+    }
+    // Спершу тимчасовий файл: обрив посеред запису не зіпсує попередній стан.
+    let tmp = format!("{path}.tmp");
+    std::fs::write(&tmp, &out).unwrap_or_else(|e| panic!("{tmp}: {e}"));
+    std::fs::rename(&tmp, path).unwrap_or_else(|e| panic!("{path}: {e}"));
+}
+
+/// Читає стан у tr; None – файлу немає. Стан з іншими розмірами мережі чи числом епох – помилка.
+fn load_state(path: &str, tr: &mut Trainer, epochs: usize) -> Option<Saved> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => panic!("{path}: {e}"),
+    };
+    let n = tr.model.p.len();
+    assert!(
+        bytes.len() == 8 + 8 * 8 + 12 * n && &bytes[..8] == STATE_MAGIC,
+        "{path}: не стан навчання цієї мережі"
+    );
+    let u = |i: usize| u64::from_le_bytes(bytes[8 + 8 * i..16 + 8 * i].try_into().unwrap());
+    assert!(
+        u(0) as usize == tr.model.h && u(1) as usize == tr.model.b && u(2) as usize == epochs,
+        "{path}: стан для мережі {}×{} на {} епох, а задано {}×{} на {epochs}",
+        u(0),
+        u(1),
+        u(2),
+        tr.model.h,
+        tr.model.b
+    );
+    let floats = &bytes[8 + 8 * 8..];
+    for (k, v) in [&mut tr.model.p, &mut tr.m1, &mut tr.m2]
+        .into_iter()
+        .enumerate()
+    {
+        for (j, x) in v.iter_mut().enumerate() {
+            let o = 4 * (k * n + j);
+            *x = f32::from_le_bytes(floats[o..o + 4].try_into().unwrap());
+        }
+    }
+    Some(Saved {
+        epochs,
+        done: u(3) as usize,
+        t: u(4) as i32,
+        step: u(5) as usize,
+        total_steps: u(6) as usize,
+        seed: u(7),
+    })
 }
 
 /// Стан навчання: модель, моменти Adam і буфери градієнтів потоків.
@@ -286,13 +383,7 @@ impl Trainer {
 
 pub fn run(o: Options) {
     let start = Instant::now();
-    let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
-    let mut rnd = move || {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        seed
-    };
+    let mut rng = Rng(0x2545_F491_4F6C_DD1D);
     // Розміри файлів; на перевірку – по кілька перших записів з кожного, у навчання вони не йдуть.
     let files: Vec<(String, usize)> = o
         .data
@@ -338,10 +429,44 @@ pub fn run(o: Options) {
         // Неповні мінівибірки в кінці шматків дають кілька зайвих кроків: прогрес обмежено одиницею.
         total_steps: train_n.div_ceil(o.batch) * o.epochs,
     };
+    let mut first = 0;
+    if let Some(path) = &o.state {
+        if let Some(sv) = load_state(path, &mut tr, o.epochs) {
+            assert_eq!(
+                sv.total_steps, tr.total_steps,
+                "{path}: стан для інших даних"
+            );
+            tr.t = sv.t;
+            tr.step = sv.step;
+            rng = Rng(sv.seed);
+            first = sv.done;
+            if first < o.epochs {
+                eprintln!("продовжую з епохи {}/{}", first + 1, o.epochs);
+            } else {
+                // Навчання вже скінчилося: мережа – зі стану, щоб файл був і в цьому запуску.
+                std::fs::write(&o.out, tr.model.quantize().to_bytes()).expect("запис мережі");
+            }
+        }
+    }
     let mut order: Vec<usize> = (0..files.len()).collect();
+    let mut epoch_secs = 0.0f64;
 
-    for epoch in 0..o.epochs {
-        shuffle(&mut order, &mut rnd);
+    for epoch in first..o.epochs {
+        if let Some(limit) = o.max_minutes {
+            let elapsed = start.elapsed().as_secs_f64();
+            if epoch > first && elapsed + epoch_secs * 1.05 > limit * 60.0 {
+                eprintln!(
+                    "час вичерпано: зроблено {epoch} з {} епох, епоха триває {:.0} хв",
+                    o.epochs,
+                    epoch_secs / 60.0
+                );
+                return;
+            }
+        }
+        let epoch_start = Instant::now();
+        // Порядок файлів у кожній епохі – з поточного стану генератора, тож продовження його повторює.
+        order.sort_unstable();
+        shuffle(&mut order, &mut rng);
         // Шматок може перевищити межу на один файл: місце під це – одразу, без подвоєння вектора.
         let biggest = files.iter().map(|(_, n)| *n).max().unwrap_or(0);
         let mut buf: Vec<Sample> = Vec::with_capacity(buffer.min(train_n) + biggest);
@@ -350,7 +475,7 @@ pub fn run(o: Options) {
             let (path, n) = &files[i];
             read_into(path, skip(*n), *n, &mut buf);
             if buf.len() >= buffer || k + 1 == order.len() {
-                shuffle(&mut buf, &mut rnd);
+                shuffle(&mut buf, &mut rng);
                 train_loss += tr.train_on(&buf, &o);
                 buf.clear();
             }
@@ -370,7 +495,20 @@ pub fn run(o: Options) {
             start.elapsed().as_secs_f64()
         );
         std::fs::write(&o.out, tr.model.quantize().to_bytes()).expect("запис мережі");
+        if let Some(path) = &o.state {
+            let sv = Saved {
+                epochs: o.epochs,
+                done: epoch + 1,
+                t: tr.t,
+                step: tr.step,
+                total_steps: tr.total_steps,
+                seed: rng.0,
+            };
+            save_state(path, &tr, &sv);
+        }
+        epoch_secs = epoch_start.elapsed().as_secs_f64();
     }
+    eprintln!("навчання завершено");
 }
 
 #[cfg(test)]
