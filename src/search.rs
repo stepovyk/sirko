@@ -222,6 +222,8 @@ struct Worker<'a> {
     eval_stack: [i32; MAX_PLY + 4],
     /// Скільки подвійних розширень на шляху до цієї глибини (щоб пошук не розростався).
     dext: [u8; MAX_PLY + 4],
+    /// Скільки вузлів пішло на кожен хід кореня (from * 64 + to).
+    root_nodes: Vec<u64>,
     pv: Box<[[Move; MAX_PLY + 4]; MAX_PLY + 4]>,
     pv_len: [usize; MAX_PLY + 4],
     stopped: bool,
@@ -309,6 +311,7 @@ impl<'a> Worker<'a> {
             stack_piece: [NO_PIECE; MAX_PLY + 4],
             eval_stack: [0; MAX_PLY + 4],
             dext: [0; MAX_PLY + 4],
+            root_nodes: vec![0; 64 * 64],
             pv: Box::new([[Move::NONE; MAX_PLY + 4]; MAX_PLY + 4]),
             pv_len: [0; MAX_PLY + 4],
             stopped: false,
@@ -1001,6 +1004,7 @@ impl<'a> Worker<'a> {
 
             let child = p.make(m);
             let piece = p.piece_at(m.from());
+            let nodes_before = self.nodes;
             self.acc_push(p, m, ply);
             self.push(ply, m, piece, child.key);
             let new_depth = depth - 1 + ext;
@@ -1054,6 +1058,10 @@ impl<'a> Worker<'a> {
                 }
             }
             self.pop();
+            if root {
+                self.root_nodes[m.from() as usize * 64 + m.to() as usize] +=
+                    self.nodes - nodes_before;
+            }
             if self.stopped {
                 return 0;
             }
@@ -1305,7 +1313,7 @@ pub fn think(
                 }
             }
             // Єдиний хід або стабільний найкращий – менше часу; хитання – більше.
-            let factor = if legal.len == 1 {
+            let mut factor = if legal.len == 1 {
                 0.2
             } else if stable >= 4 {
                 0.7
@@ -1314,6 +1322,13 @@ pub fn think(
             } else {
                 1.0
             };
+            // Майже весь пошук пішов на найкращий хід – він очевидний; мало – є суперники.
+            if depth >= 6 && !result.best.is_none() && w.nodes > 0 {
+                let b = result.best;
+                let frac =
+                    w.root_nodes[b.from() as usize * 64 + b.to() as usize] as f64 / w.nodes as f64;
+                factor *= ((1.5 - frac) * 1.35).clamp(0.5, 2.0);
+            }
             let pondering = shared.pondering.load(Ordering::Relaxed);
             if !pondering && !limits.infinite && !clock.continue_iterating(factor) {
                 break;
