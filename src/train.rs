@@ -442,6 +442,9 @@ pub fn run(o: Options) {
             first = sv.done;
             if first < o.epochs {
                 eprintln!("продовжую з епохи {}/{}", first + 1, o.epochs);
+            } else {
+                // Навчання вже скінчилося: мережа – зі стану, щоб файл був і в цьому запуску.
+                std::fs::write(&o.out, tr.model.quantize().to_bytes()).expect("запис мережі");
             }
         }
     }
@@ -452,7 +455,11 @@ pub fn run(o: Options) {
         if let Some(limit) = o.max_minutes {
             let elapsed = start.elapsed().as_secs_f64();
             if epoch > first && elapsed + epoch_secs * 1.05 > limit * 60.0 {
-                eprintln!("час вичерпано: зроблено {epoch} з {} епох", o.epochs);
+                eprintln!(
+                    "час вичерпано: зроблено {epoch} з {} епох, епоха триває {:.0} хв",
+                    o.epochs,
+                    epoch_secs / 60.0
+                );
                 return;
             }
         }

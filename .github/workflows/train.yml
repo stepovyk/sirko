@@ -33,8 +33,8 @@ on:
         description: "Номери попередніх запусків, чию самогру додати до цієї (через пробіл)"
         default: ""
       stage_minutes:
-        description: "Хвилин навчання на етап (до трьох етапів, кожен продовжує попередній)"
-        default: "320"
+        description: "Хвилин від старту машини до кінця навчання на етапі (до трьох етапів, кожен продовжує попередній)"
+        default: "330"
 
 permissions:
   contents: read
@@ -77,6 +77,7 @@ jobs:
           compression-level: 1
 
   # Навчання етапами до ~5,5 години (межа машини – 6): кожен наступний етап продовжує зі стану попереднього.
+  # Якщо й після третього етапу епохи не скінчились, матч грає неповна мережа (з попередженням у журналі).
   train:
     needs: selfplay
     if: always() && (needs.selfplay.result == 'success' || needs.selfplay.result == 'skipped')
@@ -92,6 +93,7 @@ jobs:
       - name: Місце для даних
         # Самогра кількох запусків – десятки гігабайтів: кладемо її на більший диск машини.
         run: |
+          echo "JOB_START=$(date +%s)" >>"$GITHUB_ENV"
           df -h . /mnt || true
           if [ -d /mnt ] && [ "$(df --output=avail -B1 /mnt | tail -1)" -gt "$(df --output=avail -B1 . | tail -1)" ]; then
             sudo mkdir -p /mnt/data
@@ -132,9 +134,10 @@ jobs:
         run: cargo build --release
       - name: Навчання
         id: learn
-        # Мережа й стан пишуться після кожної епохи: якщо час вийде, лишається остання.
-        timeout-minutes: 340
-        continue-on-error: true
+        # Тренер сам не починає епоху, що не встигне до межі етапу (від старту машини, разом із завантаженням).
+        # Падіння тренера – помилка етапу, а не «час вичерпано».
+        timeout-minutes: 350
+        shell: bash
         env:
           HIDDEN: ${{ inputs.hidden }}
           EPOCHS: ${{ inputs.epochs }}
@@ -143,9 +146,18 @@ jobs:
         run: |
           ls -la data/
           df -h data/
+          if [ "${GITHUB_JOB}" != train ] && [ ! -s train.state ]; then
+            echo "::error::немає стану попереднього етапу"
+            exit 1
+          fi
+          left=$(( STAGE_MINUTES - ($(date +%s) - JOB_START) / 60 ))
           ./target/release/sirko train sirko.nnue "${HIDDEN}" "${EPOCHS}" --batch=16384 --lr=0.001 --wdl=0.4 \
-            "--buckets=${BUCKETS}" --state=train.state "--max-minutes=${STAGE_MINUTES}" data/*.bin 2>&1 | tee train.log
-          if grep -q "^навчання завершено" train.log; then echo "done=true" >>"$GITHUB_OUTPUT"; fi
+            "--buckets=${BUCKETS}" --state=train.state "--max-minutes=${left}" data/*.bin 2>&1 | tee train.log
+          if grep -q "^навчання завершено" train.log; then
+            echo "done=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "::warning::$(grep "^час вичерпано" train.log)"
+          fi
       - uses: actions/upload-artifact@v7
         with:
           name: net
@@ -190,7 +202,8 @@ jobs:
     needs: [train, train2, train3]
     # Після останнього етапу – навіть неповна мережа: краще перевірити її, ніж втратити.
     if: >-
-      always() && (needs.train.outputs.done == 'true' || needs.train2.outputs.done == 'true'
+      always() && ((needs.train.result == 'success' && needs.train.outputs.done == 'true')
+      || (needs.train2.result == 'success' && needs.train2.outputs.done == 'true')
       || needs.train3.result == 'success')
     strategy:
       fail-fast: false
