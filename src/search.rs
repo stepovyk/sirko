@@ -869,7 +869,15 @@ impl<'a> Worker<'a> {
             static_eval
         };
         self.eval_stack[ply] = eval;
-        let improving = !in_check && ply >= 2 && eval > self.eval_stack[ply - 2];
+        // Чи оцінка краща, ніж на нашому попередньому ході; якщо тоді був шах (оцінки немає) – ще на хід раніше.
+        let improving = !in_check
+            && if ply >= 2 && self.eval_stack[ply - 2] != -INF {
+                eval > self.eval_stack[ply - 2]
+            } else if ply >= 4 && self.eval_stack[ply - 4] != -INF {
+                eval > self.eval_stack[ply - 4]
+            } else {
+                true
+            };
         if ply + 1 < MAX_PLY {
             self.killers[ply + 1] = [Move::NONE; 2];
         }
