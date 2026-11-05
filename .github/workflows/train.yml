@@ -393,9 +393,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -qam "Мережа самонавчання: ${LINE}"
+          pushed=false
           for _ in 1 2 3; do
-            git push origin HEAD:main && break
+            if git push origin HEAD:main; then pushed=true; break; fi
             git pull -q --rebase origin main
           done
+          "${pushed}" || { echo "::error::не вдалося запушити в main"; exit 1; }
           # Пуш від імені дії не запускає інших дій: перевірку (а з нею й release) запускаємо самі.
           gh workflow run check.yml --ref main
