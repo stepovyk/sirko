@@ -596,7 +596,17 @@ cmd_status() {
   user=$(cat "${USER_FILE}" 2>/dev/null || true)
   say ""
   say "  ${TITLE}"
-  say "  Стан:      $([[ ${active} == active ]] && echo працює || echo "${active}")"
+  local state
+  case ${active} in
+    active) state="працює" ;;
+    inactive) state="зупинено" ;;
+    activating) state="запускається" ;;
+    deactivating) state="дограє партію й зупиняється" ;;
+    failed) state="збій (sirko-bot log)" ;;
+    *) state=${active} ;;
+  esac
+  [[ -s ${TOKEN_FILE} ]] || state="чекає на ключ Lichess: sudo sirko-bot token"
+  say "  Стан:      ${state}"
   say "  Рушій:     Сірко ${version}"
   [[ -s ${LAST_UPDATE} ]] && say "  Оновлення: $(head -n 1 "${LAST_UPDATE}")"
   [[ ${user} =~ ^[A-Za-z0-9_-]{2,30}$ ]] || return 0
