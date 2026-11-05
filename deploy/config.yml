@@ -25,15 +25,20 @@ engine:
     offer_draw_pieces: 10
   online_moves:
     max_out_of_book_moves: 0
-    max_retries: 0
+    max_retries: 2
     chessdb_book:
       enabled: false
     lichess_cloud_analysis:
       enabled: false
     lichess_opening_explorer:
       enabled: false
-    online_egtb:
-      enabled: false
+    online_egtb:                    # до 7 фігур – ідеальна гра з таблиць закінчень Lichess
+      enabled: true
+      min_time: 10
+      max_time: 10800
+      max_pieces: 7
+      source: "lichess"
+      move_quality: "best"
   lichess_bot_tbs:
     syzygy:
       enabled: false
