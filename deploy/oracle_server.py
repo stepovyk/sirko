@@ -45,7 +45,7 @@ def main():
     found = [i for i in every(compute.list_instances, tenancy, display_name=NAME).data if i.lifecycle_state in alive]
     if found:
         inst = found[0]
-        print(f"Сервер уже є: {inst.shape_config.ocpus:g} ядра, {inst.shape_config.memory_in_gbs:g} ГБ, {inst.lifecycle_state}")
+        print(f"Сервер уже є: {inst.shape_config.ocpus:g} ×ARM, {inst.shape_config.memory_in_gbs:g} ГБ, {inst.lifecycle_state}")
     else:
         image = next(
             img for img in every(
@@ -68,13 +68,13 @@ def main():
                 try:
                     inst = compute.launch_instance(details).data
                 except oci.exceptions.ServiceError as e:
-                    print(f"{ocpus} ядра, {ad.split(':')[-1]}: {e.message}")
+                    print(f"{ocpus} ×ARM, {mem} ГБ, {ad.split(':')[-1]}: {e.message}")
                     if e.status == 429:
                         time.sleep(30)
                     elif "capacity" not in e.message.lower():
                         raise
                     continue
-                print(f"Створено сервер: {ocpus} ядра, {mem} ГБ, {ad.split(':')[-1]}, {image.display_name}")
+                print(f"Створено сервер: {ocpus} ×ARM, {mem} ГБ, {ad.split(':')[-1]}, {image.display_name}")
                 break
             if inst:
                 break
