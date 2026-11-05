@@ -504,6 +504,7 @@ impl<'a> Worker<'a> {
         scores: &mut [i32; 256],
         tt_move: Move,
         ply: usize,
+        see: bool,
     ) {
         let prev = if ply > 0 {
             self.stack_move[ply - 1]
@@ -539,7 +540,8 @@ impl<'a> Worker<'a> {
                 let hist = self.h.capture_hist[p.piece_at(m.from()) as usize][m.to() as usize]
                     [Self::victim(p, m)];
                 let base = victim_value * 10 + promo - SEE_VALUE[attacker] / 10 + hist / 16;
-                if see_ge(p, m, -50) {
+                // У тихому пошуку погані взяття й так пропускаються: SEE для порядку там зайвий.
+                if !see || see_ge(p, m, -50) {
                     (1 << 28) + base
                 } else {
                     -(1 << 20) + base
@@ -708,13 +710,14 @@ impl<'a> Worker<'a> {
         p.generate(&mut list, !in_check);
         let mut scores = [0i32; 256];
         let tt_move = tt.map(|e| e.mv).unwrap_or(Move::NONE);
-        self.score_moves(p, &list, &mut scores, tt_move, ply);
+        self.score_moves(p, &list, &mut scores, tt_move, ply, in_check);
         let mut best_move = Move::NONE;
         let mut legal = 0;
+        let pinned = p.pinned(p.side);
         for i in 0..list.len {
             pick(&mut list, &mut scores, i);
             let m = list.moves[i];
-            if !p.is_legal(m) {
+            if !p.is_legal_pinned(m, pinned) {
                 continue;
             }
             legal += 1;
@@ -920,7 +923,7 @@ impl<'a> Worker<'a> {
         let mut list = MoveList::new();
         p.generate(&mut list, false);
         let mut scores = [0i32; 256];
-        self.score_moves(p, &list, &mut scores, tt_move, ply);
+        self.score_moves(p, &list, &mut scores, tt_move, ply, true);
 
         let mut best = -INF;
         let mut best_move = Move::NONE;
@@ -931,10 +934,11 @@ impl<'a> Worker<'a> {
         let mut captures_tried: [Move; 32] = [Move::NONE; 32];
         let mut n_captures = 0;
 
+        let pinned = p.pinned(p.side);
         for i in 0..list.len {
             pick(&mut list, &mut scores, i);
             let m = list.moves[i];
-            if m == excluded || !p.is_legal(m) {
+            if m == excluded || !p.is_legal_pinned(m, pinned) {
                 continue;
             }
             legal += 1;
