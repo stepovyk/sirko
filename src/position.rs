@@ -653,6 +653,12 @@ impl Position {
 
     /// Чи легальний псевдолегальний хід (свій король не лишається під шахом).
     pub fn is_legal(&self, m: Move) -> bool {
+        self.is_legal_pinned(m, self.pinned(self.side))
+    }
+
+    /// Те саме з готовими зв'язаними фігурами (`pinned(side)`): у пошуку їх рахуємо раз на вузол.
+    #[inline]
+    pub fn is_legal_pinned(&self, m: Move, pinned: Bitboard) -> bool {
         let us = self.side;
         let them = us ^ 1;
         let (from, to) = (m.from(), m.to());
@@ -705,7 +711,6 @@ impl Position {
             }
         }
         // Зв'язана фігура ходить лише по лінії зв'язки.
-        let pinned = self.pinned(us);
         pinned & bit(from) == 0 || line(ksq, from) & bit(to) != 0
     }
 
@@ -714,8 +719,9 @@ impl Position {
         let mut all = MoveList::new();
         self.generate(&mut all, false);
         let mut out = MoveList::new();
+        let pinned = self.pinned(self.side);
         for &m in all.iter() {
-            if self.is_legal(m) {
+            if self.is_legal_pinned(m, pinned) {
                 out.push(m);
             }
         }

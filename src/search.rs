@@ -711,10 +711,11 @@ impl<'a> Worker<'a> {
         self.score_moves(p, &list, &mut scores, tt_move, ply);
         let mut best_move = Move::NONE;
         let mut legal = 0;
+        let pinned = p.pinned(p.side);
         for i in 0..list.len {
             pick(&mut list, &mut scores, i);
             let m = list.moves[i];
-            if !p.is_legal(m) {
+            if !p.is_legal_pinned(m, pinned) {
                 continue;
             }
             legal += 1;
@@ -931,10 +932,11 @@ impl<'a> Worker<'a> {
         let mut captures_tried: [Move; 32] = [Move::NONE; 32];
         let mut n_captures = 0;
 
+        let pinned = p.pinned(p.side);
         for i in 0..list.len {
             pick(&mut list, &mut scores, i);
             let m = list.moves[i];
-            if m == excluded || !p.is_legal(m) {
+            if m == excluded || !p.is_legal_pinned(m, pinned) {
                 continue;
             }
             legal += 1;
