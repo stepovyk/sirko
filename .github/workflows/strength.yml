@@ -2,6 +2,9 @@ name: Сила проти Stockfish
 
 # Сірко проти свіжого Stockfish з обмеженою силою, партії на 8 машинах паралельно.
 on:
+  # Щотижня після самонавчання: чи Сірко досі не слабший за свіжий Stockfish на найвищому обмеженні.
+  schedule:
+    - cron: "17 5 * * 1"
   workflow_dispatch:
     inputs:
       ref:
@@ -33,7 +36,7 @@ jobs:
           fetch-depth: 0
       - name: Збирання Сірка й завантаження Stockfish
         env:
-          REF: ${{ inputs.ref }}
+          REF: ${{ inputs.ref || 'main' }}
           GH_TOKEN: ${{ github.token }}
         run: |
           pip install --break-system-packages chess==1.11.2
@@ -49,9 +52,9 @@ jobs:
           printf 'uci\nquit\n' | ../stockfish | grep -E "^id name|UCI_Elo"
       - name: Матч
         env:
-          ELO: ${{ inputs.elo }}
-          GAMES: ${{ inputs.games }}
-          TC: ${{ inputs.tc }}
+          ELO: ${{ inputs.elo || '3190' }}
+          GAMES: ${{ inputs.games || '150' }}
+          TC: ${{ inputs.tc || '8+0.08' }}
           SHARD: ${{ matrix.shard }}
         run: |
           python3 tools/match.py --a ../engine/target/release/sirko --b ../stockfish \
@@ -73,9 +76,9 @@ jobs:
           merge-multiple: true
       - name: Підсумок
         env:
-          ELO: ${{ inputs.elo }}
+          ELO: ${{ inputs.elo || '3190' }}
         run: |
-          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY'
           import glob, math, os, re
           w = d = l = 0
           for f in glob.glob("result-*.txt"):
@@ -86,5 +89,10 @@ jobs:
           p = (w + d / 2) / n
           elo = -400 * math.log10(1 / p - 1) if 0 < p < 1 else float("nan")
           err = 400 / math.log(10) * 1.96 * math.sqrt(p * (1 - p) / n) / (p * (1 - p)) if 0 < p < 1 else float("nan")
-          print(f"Сірко проти Stockfish {os.environ['ELO']}: +{w} ={d} -{l}, очки {100 * p:.1f}%, Elo {elo:+.0f} ± {err:.0f} ({n} партій)")
+          line = f"Сірко проти Stockfish {os.environ['ELO']}: +{w} ={d} -{l}, очки {100 * p:.1f}%, Elo {elo:+.0f} ± {err:.0f} ({n} партій)"
+          print(line)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write(line + "\n")
+          if p < 0.5:
+              print(f"::warning::Сірко набрав менше половини очок проти Stockfish {os.environ['ELO']}")
           PY
