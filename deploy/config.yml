@@ -59,7 +59,7 @@ correspondence:
   ponder: false
 
 challenge:
-  concurrency: 1                    # одна партія за раз: сервер ділить з Характерником
+  concurrency: 1                    # одна партія за раз: уся сила сервера – в одну партію
   sort_by: "best"
   preference: "none"
   accept_bot: true

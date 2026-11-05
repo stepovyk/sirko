@@ -2,8 +2,8 @@
 Description=SirkoAI – оновлення щоночі
 
 [Timer]
-# Після нічного оновлення Характерника (04:00): lichess-bot уже свіжий.
-OnCalendar=*-*-* 05:30:00 Europe/Kyiv
+# Уночі, коли на Lichess найменше гравців; бот спершу дограє партію.
+OnCalendar=*-*-* 04:30:00 Europe/Kyiv
 RandomizedDelaySec=20min
 Persistent=true
 

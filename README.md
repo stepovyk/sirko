@@ -66,22 +66,16 @@ python3 tools/match.py --a ./target/release/sirko --b stockfish --b-opt UCI_Limi
 
 ## Бот SirkoAI
 
-Сірко грає на Lichess окремим ботом [SirkoAI](https://lichess.org/@/SirkoAI) на тому ж сервері, що й Характерник, і бере його lichess-bot. Грає лише сам рушій: ні баз дебютів, ні таблиць закінчень, ні хмарного аналізу. Коли грають обидва боти, процесор дістається головно Характернику.
+Сірко грає на Lichess окремим ботом [SirkoAI](https://lichess.org/@/SirkoAI) на власному сервері (Ubuntu чи Debian, зокрема ARM) через lichess-bot. Грає лише сам рушій: ні баз дебютів, ні таблиць закінчень, ні хмарного аналізу. Рушій бере всі ядра сервера, грає одну партію за раз і нікого не уникає: приймає виклики від усіх і сам кличе ботів, коли без гри.
 
-Встановлення на сервері з Характерником:
-
-1. Створіть ключ сервера для цього репозиторію й покажіть його:
+Встановлення:
 
 ```bash
-sudo install -d -m 755 /etc/sirko && sudo ssh-keygen -q -t ed25519 -N "" -C sirko-server -f /etc/sirko/deploy_key && sudo cat /etc/sirko/deploy_key.pub
+sudo git clone https://github.com/stepovyk/sirko.git /opt/sirko/src && sudo /opt/sirko/src/deploy/sirko-bot install
+sudo sirko-bot token
 ```
 
-2. Додайте рядок на GitHub: репозиторій → Settings → Deploy keys → Add deploy key, без дозволу на запис.
-3. Завантажте код і встановіть (спитає ключ Lichess акаунта SirkoAI з дозволом «Play games with the bot API»):
-
-```bash
-sudo GIT_SSH_COMMAND="ssh -i /etc/sirko/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" git clone git@github.com:stepovyk/sirko.git /opt/sirko/src && sudo /opt/sirko/src/deploy/sirko-bot install
-```
+Перша команда ставить усе (свіжий lichess-bot, рушій, зібраний і перевірений на місці, служби), друга питає ключ Lichess акаунта SirkoAI з дозволом «Play games with the bot API» і запускає бота. Ключ лишається лише на сервері.
 
 Далі сервер щоночі сам ставить нову версію з гілки `release`, куди CI переносить лише перевірені коміти. Керування: `sirko-bot help`.
 

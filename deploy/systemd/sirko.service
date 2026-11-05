@@ -2,17 +2,19 @@
 Description=SirkoAI – шаховий рушій Сірко на Lichess
 After=network-online.target
 Wants=network-online.target
+# Без ключа Lichess боту нічого робити: його дає sudo sirko-bot token.
+ConditionPathExists=/etc/sirko/token.env
 StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=sirko
 Group=sirko
-# lichess-bot – той самий, що ставить і оновлює Характерник (з його латкою); Сірку – лише на читання.
-WorkingDirectory=/opt/kharakternyk/lichess-bot
+# lichess-bot ставить і оновлює sirko-bot; служба його лише читає.
+WorkingDirectory=/opt/sirko/lichess-bot
 EnvironmentFile=/etc/sirko/token.env
 Environment=PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 COLUMNS=200
-ExecStart=/opt/kharakternyk/lichess-bot/venv/bin/python /opt/kharakternyk/lichess-bot/lichess-bot.py --config /opt/sirko/config.yml --disable_auto_logging
+ExecStart=/opt/sirko/lichess-bot/venv/bin/python /opt/sirko/lichess-bot/lichess-bot.py --config /opt/sirko/config.yml --disable_auto_logging
 Restart=always
 RestartSec=5
 RestartSteps=6
@@ -26,9 +28,8 @@ TimeoutStopSec=150min
 StateDirectory=sirko/games
 StateDirectoryMode=0755
 
-# Сервер – спільний з Характерником: коли грають обидва, процесор головно йому.
-CPUWeight=30
-MemoryMax=30%
+# Сервер – лише Сірка: рушій бере всі ядра; пам'яті – з запасом системі.
+MemoryMax=85%
 
 UMask=0077
 NoNewPrivileges=yes
@@ -36,7 +37,7 @@ CapabilityBoundingSet=
 ProtectSystem=strict
 ProtectHome=yes
 TemporaryFileSystem=/opt:ro
-BindReadOnlyPaths=/opt/sirko /opt/kharakternyk/lichess-bot
+BindReadOnlyPaths=/opt/sirko
 PrivateTmp=yes
 PrivateDevices=yes
 PrivateIPC=yes

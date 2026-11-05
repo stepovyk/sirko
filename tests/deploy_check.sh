@@ -1,36 +1,34 @@
 #!/usr/bin/env bash
-# Встановлення бота на чистій Ubuntu 24.04, як на сервері: системний cargo (1.75), збирання від
-# безправного користувача, perft і перевірка UCI, налаштування очима lichess-bot, служби systemd.
-# lichess-bot ставиться туди, де його тримає Характерник.
+# Встановлення бота на чистій Ubuntu 24.04, як на сервері, справжньою командою sirko-bot install:
+# системні пакети, свій lichess-bot з master (з перевіркою на партіях за листуванням), збирання
+# системним cargo від безправного користувача, perft і перевірка UCI, налаштування очима
+# lichess-bot, служби systemd. Ключа Lichess тут немає: бот має все підготувати й чекати на нього.
 set -Eeuo pipefail
 
 here=$(cd "$(dirname "$0")/.." && pwd)
-lb=/opt/kharakternyk/lichess-bot
-install -d -m 755 /opt/kharakternyk
-git clone -q --depth 1 https://github.com/lichess-bot-devs/lichess-bot "${lb}"
-python3 -m venv "${lb}/venv"
-"${lb}/venv/bin/python" -m pip install -q -r "${lb}/requirements.txt"
-chmod -R a+rX "${lb}"
-
 install -d -m 755 /opt/sirko
 rm -rf /opt/sirko/src
 cp -r "${here}" /opt/sirko/src
+chown -R root:root /opt/sirko/src
 
-# shellcheck source=deploy/sirko-bot
-source /opt/sirko/src/deploy/sirko-bot
-trap - EXIT
-ensure_packages
-ensure_user
-rustc --version
-install -d -m 755 "${ETC}"
-printf 'LICHESS_BOT_TOKEN=lip_check\n' >"${TOKEN_FILE}"
-build_engine
-((ENGINE_NEW)) || { echo "::error::рушій не зібрано"; exit 1; }
-render_config "${CONF}.new"
-validate_config "${CONF}.new" sirko.new
-grep -E 'Threads|Hash|pgn_directory' "${CONF}.new"
-for unit in "${UNITS[@]}"; do install -m 644 "${SRC}/deploy/systemd/${unit}" "/etc/systemd/system/${unit}"; done
-mv -f "${ENGINE}/sirko.new" "${ENGINE}/sirko"
-mv -f "${CONF}.new" "${CONF}"
-systemd-analyze verify "/etc/systemd/system/${NAME}.service" "/etc/systemd/system/${NAME}-update.service" "/etc/systemd/system/${NAME}-update.timer"
+/opt/sirko/src/deploy/sirko-bot install
+
+fail() { echo "::error::$*"; exit 1; }
+test -x /opt/sirko/engine/sirko || fail "рушія немає"
+test "$(cat /opt/sirko/engine/VERSION)" = "$(git -C /opt/sirko/src rev-parse HEAD)" || fail "рушій не з цього коду"
+test -x /opt/sirko/lichess-bot/venv/bin/python || fail "lichess-bot не встановлено"
+test ! -e /opt/sirko/lichess-bot.new -a ! -e /opt/sirko/build || fail "лишилося недоготоване"
+test "$(stat -c %U /opt/sirko/lichess-bot/lichess-bot.py)" = root || fail "lichess-bot має належати root"
+grep -qE "Threads: $(nproc)$" /opt/sirko/config.yml || fail "рушій бере не всі ядра"
+grep -E 'Threads|Hash|pgn_directory' /opt/sirko/config.yml
+systemctl is-enabled -q sirko.service sirko-update.timer || fail "служби не ввімкнено"
+systemctl is-active -q sirko.service && fail "без ключа бот не має стартувати"
+systemd-analyze verify /etc/systemd/system/sirko.service /etc/systemd/system/sirko-update.service /etc/systemd/system/sirko-update.timer
+/usr/local/bin/sirko-bot status
+
+# Повторне встановлення нічого не перезбирає й не ламає.
+out=$(/opt/sirko/src/deploy/sirko-bot install 2>&1)
+printf '%s\n' "${out}"
+grep -q "lichess-bot – найновіший" <<<"${out}" || fail "lichess-bot ставиться вдруге"
+grep -q "вже зібраний" <<<"${out}" || fail "рушій збирається вдруге"
 echo "ok: встановлення Сірка на чистій Ubuntu"

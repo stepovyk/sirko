@@ -1,6 +1,6 @@
 [Unit]
 Description=SirkoAI – нічне оновлення Сірка
-After=network-online.target kharakternyk-update.service
+After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=1d
 StartLimitBurst=4
