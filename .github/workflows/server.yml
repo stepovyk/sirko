@@ -1,0 +1,86 @@
+name: Сервер
+
+# Сервер Сірка на безкоштовному Oracle Cloud: поки сервера немає, кожні 10 хвилин пробує його
+# створити (місце на ARM з'являється нечасто), тоді ставить на нього Сірка й вимикає свій розклад.
+# Ключ Lichess сюди не потрапляє: його дає людина на самому сервері (sudo sirko-bot token).
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: server
+  cancel-in-progress: false
+
+jobs:
+  server:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      OCI_USER: ${{ secrets.OCI_USER }}
+      OCI_TENANCY: ${{ secrets.OCI_TENANCY }}
+      OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+      OCI_KEY: ${{ secrets.OCI_KEY }}
+      SERVER_AUTHORIZED_KEYS: ${{ secrets.SERVER_AUTHORIZED_KEYS }}
+      SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
+    steps:
+      - name: Доступ
+        id: access
+        run: |
+          if [ -n "${OCI_KEY}" ] && [ -n "${OCI_TENANCY}" ] && [ -n "${SERVER_SSH_KEY}" ]; then
+            echo "ok=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "::notice::Немає доступу до Oracle в секретах репозиторію"
+          fi
+
+      - uses: actions/checkout@v6
+        if: steps.access.outputs.ok == 'true'
+
+      - name: Знайти або створити сервер
+        id: oracle
+        if: steps.access.outputs.ok == 'true'
+        run: |
+          python3 -m pip install -q --user --break-system-packages oci
+          python3 deploy/oracle_server.py
+
+      - name: Встановити Сірка
+        if: steps.oracle.outputs.ready == 'true'
+        env:
+          IP: ${{ steps.oracle.outputs.ip }}
+        run: |
+          echo "::add-mask::${IP}"
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "${SERVER_SSH_KEY}" >~/.ssh/server
+          chmod 600 ~/.ssh/server
+          ssh_() { ssh -i ~/.ssh/server -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 \
+            -o ServerAliveInterval=30 "ubuntu@${IP}" "$@"; }
+          for _ in $(seq 40); do ssh_ true 2>/dev/null && break; sleep 15; done
+          ssh_ 'bash -s' <<'REMOTE'
+          set -e
+          if [ -x /opt/sirko/engine/sirko ] && systemctl is-enabled -q sirko.service 2>/dev/null; then
+            /usr/local/bin/sirko-bot status
+            exit 0
+          fi
+          sudo cloud-init status --wait >/dev/null || true
+          sudo timedatectl set-timezone Europe/Kyiv
+          printf '%s\n' 'Unattended-Upgrade::Automatic-Reboot "true";' 'Unattended-Upgrade::Automatic-Reboot-Time "03:40";' \
+            | sudo tee /etc/apt/apt.conf.d/52sirko-reboot >/dev/null
+          sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get -o DPkg::Lock::Timeout=600 update -qq
+          sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get -o DPkg::Lock::Timeout=600 -y -qq full-upgrade >/dev/null
+          [ -d /opt/sirko/src/.git ] || sudo git clone -q https://github.com/stepovyk/sirko.git /opt/sirko/src
+          sudo /opt/sirko/src/deploy/sirko-bot install
+          if [ -f /var/run/reboot-required ]; then sudo systemd-run --on-active=30 systemctl reboot >/dev/null; fi
+          REMOTE
+          rm -f ~/.ssh/server
+
+      - name: Вимкнути розклад
+        if: steps.oracle.outputs.ready == 'true' && success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow disable server.yml -R "${GITHUB_REPOSITORY}"
+          echo "Сервер готовий, розклад вимкнено. Ключ Lichess: sudo sirko-bot token на сервері." >>"$GITHUB_STEP_SUMMARY"
