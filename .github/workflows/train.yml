@@ -389,13 +389,14 @@ jobs:
           print(summary)
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
               f.write(summary + "\n")
+          won = los >= 0.975 and n >= 2000
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-              f.write(f"won={'true' if los >= 0.975 and n >= 2000 else 'false'}\n")
-          if los < 0.975 or n < 2000:
+              f.write(f"won={'true' if won else 'false'}\n")
+              f.write(f"line={elo:+.0f} ± {err:.0f} Elo проти попередньої ({n} партій, 8+0,08 с)\n")
+          if not won:
               why = "замало партій для злиття" if n < 2000 else "перевага не впевнена (треба 97,5%)"
               with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
                   f.write(f"У main не йде: {why}\n")
-              f.write(f"line={elo:+.0f} ± {err:.0f} Elo проти попередньої ({n} партій, 8+0,08 с)\n")
 
   # Переможна мережа – у main: далі перевірки й release, а сервер поставить її вночі сам.
   publish:

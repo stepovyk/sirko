@@ -205,8 +205,16 @@ pub fn run(opt: Options) {
     let games = Arc::new(AtomicU64::new(0));
     let positions = Arc::new(AtomicU64::new(0));
     let start = Instant::now();
+    // Машини самогри – свіжі й однакові, процеси там мають схожі номери: зерно з годинника й назви файлу,
+    // щоб різні машини не грали тих самих партій.
+    let clock = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64);
+    let name = opt.out.bytes().fold(0xCBF2_9CE4_8422_2325u64, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x0100_0000_01B3)
+    });
     let seed =
-        start.elapsed().as_nanos() as u64 ^ std::process::id() as u64 ^ 0x9E37_79B9_7F4A_7C15;
+        clock ^ name.rotate_left(29) ^ ((std::process::id() as u64) << 40) ^ 0x9E37_79B9_7F4A_7C15;
     std::thread::scope(|scope| {
         for t in 0..opt.threads.max(1) {
             let out = Arc::clone(&out);

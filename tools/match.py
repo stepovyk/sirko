@@ -60,8 +60,6 @@ def play(white, black, opening, base, inc, game_no):
         board.push_uci(u)
     clock = [base, base]
     engines = [white, black]
-    for e in engines:
-        e.protocol.send_line("ucinewgame") if hasattr(e.protocol, "send_line") else None
     while not board.is_game_over(claim_draw=True):
         side = 0 if board.turn == chess.WHITE else 1
         limit = chess.engine.Limit(white_clock=clock[0], black_clock=clock[1], white_inc=inc, black_inc=inc)
