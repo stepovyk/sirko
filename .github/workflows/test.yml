@@ -46,6 +46,7 @@ jobs:
           (cd ../test && cargo build --release -q)
           (cd ../base && cargo build --release -q)
       - name: Матч
+        shell: bash
         env:
           OPTS: ${{ inputs.options }}
           GAMES: ${{ inputs.games }}
@@ -71,15 +72,23 @@ jobs:
           pattern: result-*
           merge-multiple: true
       - name: Підсумок
+        shell: bash
+        env:
+          GAMES: ${{ inputs.games }}
         run: |
           python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
-          import glob, math, re
+          import glob, math, os, re
           w = d = l = 0
           for f in glob.glob("result-*.txt"):
               m = re.search(r"\+(\d+) =(\d+) -(\d+)", open(f).read())
               if m:
                   w += int(m[1]); d += int(m[2]); l += int(m[3])
           n = w + d + l
+          # Неповний матч (машина впала) – не результат.
+          files = len(glob.glob("result-*.txt"))
+          games = int(os.environ["GAMES"])
+          if files != 8 or n != 8 * games:
+              raise SystemExit(f"неповний матч: {files} з 8 машин, {n} з {8 * games} партій")
           p = (w + d / 2) / n
           elo = -400 * math.log10(1 / p - 1) if 0 < p < 1 else float("nan")
           err = 400 / math.log(10) * 1.96 * math.sqrt(p * (1 - p) / n) / (p * (1 - p)) if 0 < p < 1 else float("nan")

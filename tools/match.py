@@ -8,6 +8,7 @@
 """
 import argparse
 import math
+import os
 import random
 import shlex
 import sys
@@ -46,6 +47,13 @@ def open_engine(cmd, opts):
     return e
 
 
+def abort(msg):
+    """Зупиняє матч з помилкою одразу: потоки python-chess не дають вийти звичайним шляхом."""
+    print(msg, file=sys.stderr, flush=True)
+    sys.stdout.flush()
+    os._exit(2)
+
+
 def play(white, black, opening, base, inc, game_no):
     board = chess.Board()
     for u in opening.split():
@@ -61,7 +69,8 @@ def play(white, black, opening, base, inc, game_no):
         try:
             res = engines[side].play(board, limit, game=game_no)
         except chess.engine.EngineError as err:
-            return ("0-1" if side == 0 else "1-0"), f"рушій зламався: {err}", board
+            # Збій будь-якого рушія – вада, а не результат: матч зупиняється, щоб не рахувати хибних перемог.
+            abort(f"рушій {'білих' if side == 0 else 'чорних'} зламався на напівході {board.ply() + 1}: {err}")
         used = time.monotonic() - t
         before = clock[side]
         clock[side] -= used
@@ -71,7 +80,7 @@ def play(white, black, opening, base, inc, game_no):
             return ("0-1" if side == 0 else "1-0"), "час", board
         clock[side] += inc
         if res.move is None or res.move not in board.legal_moves:
-            return ("0-1" if side == 0 else "1-0"), f"нелегальний хід {res.move}", board
+            abort(f"нелегальний хід {res.move} у позиції {board.fen()}")
         board.push(res.move)
         if board.ply() > 600:
             return "1/2-1/2", "довжина", board
