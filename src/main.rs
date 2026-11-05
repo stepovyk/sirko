@@ -83,7 +83,7 @@ fn main() {
             };
             sirko::train::run(sirko::train::Options {
                 out: args.get(2).cloned().unwrap_or_else(|| "sirko.nnue".into()),
-                hidden: num(3, 256),
+                hidden: num(3, 512),
                 buckets: flag("buckets", sirko::nnue::BUCKETS as f64) as usize,
                 epochs: num(4, 10),
                 data: args

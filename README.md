@@ -7,23 +7,25 @@
 ## Що всередині
 
 - **Дошка** – бітборди з власними магічними числами, які рушій шукає сам на старті. Хід – 16 біт, позиція копіюється на кожен хід. Класичні шахи й шахи Фішера працюють однаково: рокіровка записується як «король бере свою туру».
-- **Пошук** – ітеративне поглиблення з вікнами прагнення, PVS і спільна таблиця переставлень на кількох потоках (Lazy SMP) без блокувань. Також нульовий хід, скорочення пізніх ходів, відсічення марних ходів, однинні продовження, тихий пошук із SEE, ходи-вбивці, історія ходів і контрходи.
-- **Оцінка** – власні ваги для середини гри й закінчення: матеріал, положення фігур, рухливість, пішакова структура, прохідні пішаки, безпека короля, загрози й нічийні закінчення.
-- **UCI** – обдумування на час суперника (ponder і ponderhit), шахи Фішера, Hash, Threads і Move Overhead. Цього досить для lichess-bot.
+- **Пошук** – ітеративне поглиблення з вікнами прагнення, PVS і спільна таблиця переставлень на кількох потоках (Lazy SMP) без блокувань. Також нульовий хід, скорочення пізніх ходів з урахуванням історії, відсічення марних ходів, однинні (й подвійні) продовження, тихий пошук із SEE, ходи-вбивці, історія ходів і продовжень, контрходи й поправка оцінки за історією пошуку.
+- **Оцінка** – власна нейромережа (нижче). Запасна – ручна оцінка з вагами для середини гри й закінчення: матеріал, положення фігур, рухливість, пішаки, безпека короля, загрози.
+- **UCI** – обдумування на час суперника (ponder і ponderhit), шахи Фішера, Hash, Threads, Move Overhead, Clear Hash і EvalFile. Цього досить для lichess-bot.
 
 ## Мережа
 
-Самогра (`sirko datagen ПАРТІЙ ВУЗЛІВ ПОТОКІВ ФАЙЛ`) пише спокійні позиції з оцінкою пошуку й результатом партії. Власний тренер (`sirko train ВИХІД ПРИХОВАНИХ ЕПОХ ДАНІ...`) вчить мережу (768 → H)×2 → 1 зі SCReLU і окремим виходом залежно від кількості фігур, а рушій оцінює нею позиції з покроковим оновленням накопичувачів. Мережа з `nets/sirko.nnue` вбудовується при збиранні, а `setoption name EvalFile` дає перевірити іншу без перезбирання.
+Самогра (`sirko datagen ПАРТІЙ ВУЗЛІВ ПОТОКІВ ФАЙЛ [ХВИЛИН]`) пише спокійні позиції з оцінкою пошуку й результатом партії. Власний тренер (`sirko train ВИХІД ПРИХОВАНИХ ЕПОХ [--batch --lr --wdl --buckets] ДАНІ...`) вчить мережу (768 → H)×2 → 1 зі SCReLU і окремим виходом залежно від кількості фігур, а рушій оцінює нею позиції з покроковим оновленням накопичувачів. Мережа з `nets/sirko.nnue` вбудовується при збиранні, а `setoption name EvalFile` дає перевірити іншу без перезбирання.
 
 Тренер читає дані з диска частинами, тож обсяг даних не впирається в пам'ять. З `--state=ФАЙЛ --max-minutes=N` він після кожної епохи зберігає весь стан і не починає епоху, що не встигне: навчання в GitHub Actions (`train.yml`) іде до трьох етапів по ~5,5 години, і кожен продовжує попередній так, ніби перерви не було.
+
+Сірко вчиться сам щотижня: самогра поточною мережею, навчання на ній і на свіжій самогрі попередніх тижнів, матч проти поточної мережі на 4800 партій. Якщо нова мережа впевнено сильніша (імовірність ≥ 97,5%), вона сама йде в рушій, а сервер ставить її наступної ночі. Окремо щотижня – замір сили проти свіжого Stockfish.
 
 ## Перевірки
 
 ```bash
-cargo test --release                                       # perft на еталонних позиціях, SEE, таблиця, симетрія оцінки
+cargo test --release                                       # perft, SEE, таблиця, симетрія оцінки, накопичувачі мережі, тренер
 ./target/release/sirko perft 6                             # 119060324
 python3 tools/movegen_check.py ./target/release/sirko      # генерація ходів проти python-chess
-python3 tools/uci_check.py ./target/release/sirko          # мати, ponder, шахи Фішера, партія сам із собою
+python3 tools/uci_check.py ./target/release/sirko          # протокол, мати, ponder, шахи Фішера, партія сам із собою
 python3 tools/match.py --a ./target/release/sirko --b stockfish --b-opt UCI_LimitStrength=true --b-opt UCI_Elo=2800 --games 30 --tc 8+0.08
 ```
 
@@ -88,8 +90,9 @@ sudo GIT_SSH_COMMAND="ssh -i /etc/sirko/deploy_key -o IdentitiesOnly=yes -o Stri
 Sirko is a UCI chess engine written from scratch in Rust with no dependencies and no code taken from other engines.
 
 - **Board**: bitboards with magic numbers found at startup, copy-make, standard chess and Chess960 (castling encoded as king-takes-rook).
-- **Search**: iterative deepening with aspiration windows, PVS, lock-free shared transposition table (Lazy SMP), null move, LMR, futility and late-move pruning, singular extensions, SEE-pruned quiescence, killers, history, countermoves.
-- **Evaluation**: a hand-written tapered evaluation and its own NNUE ((768 → H)×2 → 1 with output buckets by piece count, SCReLU, int16, incremental accumulators), trained by its own trainer on its own self-play.
+- **Search**: iterative deepening with aspiration windows, PVS, lock-free shared transposition table (Lazy SMP), null move, history-aware LMR, futility and late-move pruning, singular and double extensions, SEE-pruned quiescence, killers, history and continuation history, countermoves, correction history.
+- **Evaluation**: its own NNUE ((768 → 512)×2 → 1 with output buckets by piece count, SCReLU, int16, incremental accumulators), trained by its own trainer on its own self-play; a hand-written tapered evaluation is kept as a fallback.
+- **Self-improvement**: every week GitHub Actions runs self-play with the current net, trains a new one on about a billion positions in resumable stages, and merges it only if it wins a 4800-game match with ≥ 97.5% likelihood of superiority.
 - **Verification**: perft and a differential move generator test against python-chess on tens of thousands of positions, UCI protocol checks, CI on x86 and ARM.
 
 Build: `cargo build --release`. License: GPL-3.0.

@@ -1194,6 +1194,14 @@ pub fn think(
             score: if root.in_check() { -MATE } else { 0 },
         };
     }
+    // Єдиний хід у грі на годиннику: думати нема про що, час лишаємо собі.
+    if legal.len == 1 && limits.time[root.side].is_some() && !limits.ponder && !limits.infinite {
+        return Report {
+            best: legal.moves[0],
+            ponder: Move::NONE,
+            score: 0,
+        };
+    }
     shared.tt.new_search();
     for n in &shared.nodes {
         n.store(0, Ordering::Relaxed);

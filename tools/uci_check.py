@@ -1,18 +1,80 @@
 #!/usr/bin/env python3
 """Сірко очима python-chess (так само його бачить lichess-bot): опції, мати, обдумування на час
 суперника (ponder і ponderhit), шахи Фішера, повна партія сам із собою без жодного нелегального ходу.
+Плюс сирий протокол: на кожен go – рівно один bestmove, go infinite чекає stop, quit завершує рушій.
 
   uci_check.py ШЛЯХ_ДО_SIRKO
 """
+import queue
+import subprocess
 import sys
+import threading
 import time
 
 import chess
 import chess.engine
 
 
+def raw_protocol(cmd):
+    """Команди напряму, без python-chess: що саме і скільки разів рушій відповідає (завис – помилка)."""
+    p = subprocess.Popen([cmd], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                         text=True, bufsize=1)
+    try:
+        raw_session(p)
+    finally:
+        if p.poll() is None:
+            p.kill()
+    print("ok: сирий протокол")
+
+
+def raw_session(p):
+    lines = queue.Queue()
+    threading.Thread(target=lambda: [lines.put(x.strip()) for x in p.stdout], daemon=True).start()
+
+    def send(*cmds):
+        for c in cmds:
+            p.stdin.write(c + "\n")
+        p.stdin.flush()
+
+    def bestmoves(wait):
+        got, end = [], time.monotonic() + wait
+        while time.monotonic() < end:
+            try:
+                x = lines.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            if x.startswith("bestmove"):
+                got.append(x)
+        return got
+
+    send("uci", "setoption name Threads value 2", "isready", "ucinewgame", "position startpos")
+    send("go infinite")
+    assert bestmoves(0.5) == [], "go infinite відповів без stop"
+    send("stop")
+    got = bestmoves(1.5)
+    assert len(got) == 1, f"go infinite + stop: {got}"
+    send("go depth 6")
+    got = bestmoves(5)
+    assert len(got) == 1, f"go depth: {got}"
+    send("go ponder wtime 1000 btime 1000")
+    assert bestmoves(0.5) == [], "go ponder відповів без stop"
+    send("stop")
+    assert len(bestmoves(1.5)) == 1, "go ponder + stop"
+    # Нова позиція чи quit посеред нескінченного пошуку: одна відповідь і чистий вихід.
+    send("go infinite")
+    time.sleep(0.2)
+    send("position startpos moves e2e4", "go movetime 200")
+    got = bestmoves(2)
+    assert len(got) == 2, f"position посеред пошуку: {got}"
+    send("go infinite")
+    time.sleep(0.2)
+    send("quit")
+    p.wait(timeout=3)
+
+
 def main():
     cmd = sys.argv[1]
+    raw_protocol(cmd)
     e = chess.engine.SimpleEngine.popen_uci(cmd)
     e.configure({"Hash": 32, "Threads": 2, "Move Overhead": 50})
     assert e.id["name"].startswith("Sirko"), e.id

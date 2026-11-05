@@ -777,11 +777,6 @@ impl Position {
             && (self.by_kind[BISHOP] & LIGHT == 0 || self.by_kind[BISHOP] & !LIGHT == 0)
     }
 
-    /// Кількість ходів без руху пішаків і взять досягла 100 (і це не мат).
-    pub fn fifty_move_draw(&self) -> bool {
-        self.halfmove >= 100 && (!self.in_check() || self.legal_moves().len > 0)
-    }
-
     pub fn non_pawn_material(&self, color: usize) -> bool {
         self.by_color[color] & !(self.by_kind[PAWN] | self.by_kind[KING]) != 0
     }

@@ -61,7 +61,8 @@ jobs:
   # Перевірена версія: нічне оновлення сервера бере лише цю гілку.
   release:
     needs: [check, deploy]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Пуш від імені дії (нова мережа самонавчання) інших дій не запускає: тоді перевірку запускають вручну.
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
       contents: write

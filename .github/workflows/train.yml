@@ -1,40 +1,49 @@
 name: Навчання мережі
 
-# Самогра на багатьох машинах → навчання мережі → матч проти поточного Сірка.
-# Нова мережа не йде в рушій сама: її беру з артефактів, лише коли матч виграно.
+# Самогра на багатьох машинах → навчання мережі етапами → матч проти поточного Сірка.
+# Щотижня запускається саме: нова самогра поточною мережею плюс свіжа самогра попередніх запусків,
+# і якщо нова мережа впевнено виграла, вона сама йде в main (далі – звичайні перевірки й release).
 on:
+  schedule:
+    - cron: "17 21 * * 6"
   workflow_dispatch:
     inputs:
       shards:
         description: "Скільки машин генерують самогру"
-        default: "16"
+        default: "20"
       minutes:
         description: "Скільки хвилин самогри на машині"
-        default: "90"
+        default: "320"
       nodes:
         description: "Вузлів пошуку на хід у самогрі"
         default: "5000"
       hidden:
         description: "Нейронів прихованого шару"
-        default: "384"
+        default: "512"
       epochs:
         description: "Епох навчання"
-        default: "12"
+        default: "10"
       games:
-        description: "Партій матчу на кожну з 8 машин"
+        description: "Партій матчу на кожну машину"
         default: "50"
-      buckets:
-        description: "Кошиків виходу мережі"
-        default: "8"
       data_run:
         description: "Номер запуску, чию самогру взяти замість нової (порожньо – нова самогра)"
         default: ""
       extra_runs:
-        description: "Номери попередніх запусків, чию самогру додати до цієї (через пробіл)"
-        default: ""
+        description: "Самогра попередніх запусків: номери через пробіл, auto – найсвіжіші, порожньо – без неї"
+        default: "auto"
       stage_minutes:
-        description: "Хвилин від старту машини до кінця навчання на етапі (до трьох етапів, кожен продовжує попередній)"
+        description: "Хвилин від старту машини до кінця навчання на етапі (до трьох етапів)"
         default: "330"
+      merge:
+        description: "Якщо нова мережа впевнено виграє – самій іти в main"
+        type: boolean
+        default: false
+
+concurrency:
+  # Щотижневі запуски – по одному; ручні не заважають ні їм, ні одне одному.
+  group: train-${{ github.event_name == 'schedule' && 'auto' || github.run_id }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -42,17 +51,102 @@ permissions:
 jobs:
   plan:
     runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+      contents: read
     outputs:
       shards: ${{ steps.s.outputs.shards }}
+      minutes: ${{ steps.s.outputs.minutes }}
+      nodes: ${{ steps.s.outputs.nodes }}
+      hidden: ${{ steps.s.outputs.hidden }}
+      epochs: ${{ steps.s.outputs.epochs }}
+      games: ${{ steps.s.outputs.games }}
+      match_shards: ${{ steps.s.outputs.match_shards }}
+      data_run: ${{ steps.s.outputs.data_run }}
+      extra_runs: ${{ steps.s.outputs.extra_runs }}
+      stage_minutes: ${{ steps.s.outputs.stage_minutes }}
+      merge: ${{ steps.s.outputs.merge }}
     steps:
       - id: s
         env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SCHEDULED: ${{ github.event_name == 'schedule' }}
           SHARDS: ${{ inputs.shards }}
-        run: echo "shards=$(python3 -c 'import json,sys; print(json.dumps(list(range(min(20, int(sys.argv[1]))))))' "${SHARDS}")" >>"$GITHUB_OUTPUT"
+          MINUTES: ${{ inputs.minutes }}
+          NODES: ${{ inputs.nodes }}
+          HIDDEN: ${{ inputs.hidden }}
+          EPOCHS: ${{ inputs.epochs }}
+          GAMES: ${{ inputs.games }}
+          DATA_RUN: ${{ inputs.data_run }}
+          EXTRA_RUNS: ${{ inputs.extra_runs }}
+          STAGE_MINUTES: ${{ inputs.stage_minutes }}
+          MERGE: ${{ inputs.merge }}
+        shell: python3 {0}
+        run: |
+          import datetime, json, os, subprocess
+
+          env = os.environ
+          auto = env["SCHEDULED"] == "true"
+          merge = auto or env.get("MERGE") == "true"
+
+          def api(path, *args):
+              return subprocess.check_output(["gh", "api", *args, f"repos/{env['REPO']}/{path}"])
+
+          # GitHub вимикає розклад у репозиторії без змін за 60 днів: щотижня вмикаємо обидва знову.
+          for wf in ("train.yml", "strength.yml"):
+              api(f"actions/workflows/{wf}/enable", "-X", "PUT")
+
+          def get(name, default):
+              v = env.get(name, "").strip()
+              return v if v and not auto else default
+
+          # Якщо від матчу залежить злиття – більший матч: 16 машин по 300 партій.
+          out = {
+              "shards": json.dumps(list(range(min(20, int(get("SHARDS", "20")))))),
+              "minutes": get("MINUTES", "320"),
+              "nodes": get("NODES", "5000"),
+              "hidden": get("HIDDEN", "512"),
+              "epochs": get("EPOCHS", "10"),
+              "games": "300" if merge else get("GAMES", "50"),
+              "match_shards": json.dumps(list(range(16 if merge else 8))),
+              "data_run": "" if auto else env.get("DATA_RUN", "").strip(),
+              "stage_minutes": get("STAGE_MINUTES", "330"),
+              "merge": "true" if merge else "false",
+          }
+
+          extra = "auto" if auto else env.get("EXTRA_RUNS", "").strip()
+          if extra == "auto":
+              # Найсвіжіша самогра попередніх запусків з main, стиснено до ~9,5 ГБ: разом з новою
+              # це близько мільярда позицій. Лише та, що проживе ще 3 дні: навчання етапами довге.
+              keep = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=3)
+              runs = json.loads(api("actions/workflows/train.yml/runs?status=success&branch=main&per_page=100"))
+              picked, total = [], 0
+              for r in runs["workflow_runs"]:
+                  arts = json.loads(api(f"actions/runs/{r['id']}/artifacts?per_page=100"))["artifacts"]
+                  data = [a for a in arts if a["name"].startswith("data-")]
+                  if not data or any(
+                      a["expired"] or datetime.datetime.fromisoformat(a["expires_at"].replace("Z", "+00:00")) < keep
+                      for a in data
+                  ):
+                      continue
+                  size = sum(a["size_in_bytes"] for a in data)
+                  if total and total + size > 9.5e9:
+                      break
+                  picked.append(str(r["id"]))
+                  total += size
+              extra = " ".join(picked)
+              print(f"самогра попередніх запусків: {extra or 'немає'}, {total / 1e9:.1f} ГБ стиснено")
+          out["extra_runs"] = extra
+
+          with open(env["GITHUB_OUTPUT"], "a") as f:
+              for k, v in out.items():
+                  print(f"{k}={v}")
+                  f.write(f"{k}={v}\n")
 
   selfplay:
     needs: plan
-    if: inputs.data_run == ''
+    if: needs.plan.outputs.data_run == ''
     strategy:
       fail-fast: false
       matrix:
@@ -65,8 +159,8 @@ jobs:
         run: cargo build --release
       - name: Самогра
         env:
-          NODES: ${{ inputs.nodes }}
-          MINUTES: ${{ inputs.minutes }}
+          NODES: ${{ needs.plan.outputs.nodes }}
+          MINUTES: ${{ needs.plan.outputs.minutes }}
           SHARD: ${{ matrix.shard }}
         run: ./target/release/sirko datagen 1000000000 "${NODES}" "$(nproc)" "data-${SHARD}.bin" "${MINUTES}"
       - uses: actions/upload-artifact@v7
@@ -79,8 +173,11 @@ jobs:
   # Навчання етапами до ~5,5 години (межа машини – 6): кожен наступний етап продовжує зі стану попереднього.
   # Якщо й після третього етапу епохи не скінчились, матч грає неповна мережа (з попередженням у журналі).
   train:
-    needs: selfplay
-    if: always() && (needs.selfplay.result == 'success' || needs.selfplay.result == 'skipped')
+    needs: [plan, selfplay]
+    # Самогра частини машин могла впасти: вчимося на решті, якщо її досить (перевірка нижче).
+    if: >-
+      !cancelled() && needs.plan.result == 'success'
+      && contains(fromJSON('["success", "skipped", "failure"]'), needs.selfplay.result)
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     permissions:
@@ -88,6 +185,7 @@ jobs:
       contents: read
     outputs:
       done: ${{ steps.learn.outputs.done }}
+      samples: ${{ steps.learn.outputs.samples }}
     steps: &stage
       - uses: actions/checkout@v7
       - name: Місце для даних
@@ -101,27 +199,41 @@ jobs:
             ln -s /mnt/data data
           fi
       - uses: actions/download-artifact@v8
-        if: inputs.data_run == ''
+        if: needs.plan.outputs.data_run == ''
         with:
           pattern: data-*
           path: data
           merge-multiple: true
       - uses: actions/download-artifact@v8
-        if: inputs.data_run != ''
+        if: needs.plan.outputs.data_run != ''
         with:
           pattern: data-*
           path: data
           merge-multiple: true
-          run-id: ${{ inputs.data_run }}
+          run-id: ${{ needs.plan.outputs.data_run }}
           github-token: ${{ github.token }}
       - name: Самогра попередніх запусків
-        if: inputs.extra_runs != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          RUNS: ${{ inputs.extra_runs }}
+          RUNS: ${{ needs.plan.outputs.extra_runs }}
+          DATA_RUN: ${{ needs.plan.outputs.data_run }}
+          SHARDS: ${{ needs.plan.outputs.shards }}
         run: |
+          set -euo pipefail
+          # Нова самогра: щонайменше три чверті машин, інакше тиждень не вартий навчання.
+          if [ -z "${DATA_RUN}" ]; then
+            have=$(find data/ -maxdepth 1 -name 'data-*.bin' | wc -l)
+            want=$(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])))' "${SHARDS}")
+            echo "нова самогра: ${have} з ${want} машин"
+            [ $(( have * 4 )) -ge $(( want * 3 )) ] || { echo "::error::замало нової самогри: ${have} з ${want}"; exit 1; }
+          fi
           for id in ${RUNS}; do
+            want=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${id}/artifacts?per_page=100" \
+              --jq '[.artifacts[] | select(.name | startswith("data-")) | select(.expired | not)] | length')
             gh run download "${id}" -R "${GITHUB_REPOSITORY}" -p 'data-*' -D "data/extra-${id}"
+            have=$(find "data/extra-${id}" -name '*.bin' | wc -l)
+            # Етапи мають бачити однакові дані: неповне завантаження – помилка, а не тихо менше даних.
+            [ "${have}" -eq "${want}" ] || { echo "::error::запуск ${id}: ${have} з ${want} файлів самогри"; exit 1; }
             find "data/extra-${id}" -name '*.bin' | while read -r f; do mv "$f" "data/${id}-$(basename "$f")"; done
             rm -rf "data/extra-${id}"
           done
@@ -139,10 +251,9 @@ jobs:
         timeout-minutes: 350
         shell: bash
         env:
-          HIDDEN: ${{ inputs.hidden }}
-          EPOCHS: ${{ inputs.epochs }}
-          BUCKETS: ${{ inputs.buckets }}
-          STAGE_MINUTES: ${{ inputs.stage_minutes }}
+          HIDDEN: ${{ needs.plan.outputs.hidden }}
+          EPOCHS: ${{ needs.plan.outputs.epochs }}
+          STAGE_MINUTES: ${{ needs.plan.outputs.stage_minutes }}
         run: |
           ls -la data/
           df -h data/
@@ -152,7 +263,8 @@ jobs:
           fi
           left=$(( STAGE_MINUTES - ($(date +%s) - JOB_START) / 60 ))
           ./target/release/sirko train sirko.nnue "${HIDDEN}" "${EPOCHS}" --batch=16384 --lr=0.001 --wdl=0.4 \
-            "--buckets=${BUCKETS}" --state=train.state "--max-minutes=${left}" data/*.bin 2>&1 | tee train.log
+            --buckets=8 --state=train.state "--max-minutes=${left}" data/*.bin 2>&1 | tee train.log
+          echo "samples=$(sed -n 's/^зразків: навчання \([0-9]*\).*/\1/p' train.log)" >>"$GITHUB_OUTPUT"
           if grep -q "^навчання завершено" train.log; then
             echo "done=true" >>"$GITHUB_OUTPUT"
           else
@@ -175,8 +287,8 @@ jobs:
           if-no-files-found: error
 
   train2:
-    needs: train
-    if: always() && needs.train.result == 'success' && needs.train.outputs.done != 'true'
+    needs: [plan, train]
+    if: "!cancelled() && needs.train.result == 'success' && needs.train.outputs.done != 'true'"
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     permissions:
@@ -187,8 +299,8 @@ jobs:
     steps: *stage
 
   train3:
-    needs: train2
-    if: always() && needs.train2.result == 'success' && needs.train2.outputs.done != 'true'
+    needs: [plan, train2]
+    if: "!cancelled() && needs.train2.result == 'success' && needs.train2.outputs.done != 'true'"
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     permissions:
@@ -199,16 +311,16 @@ jobs:
     steps: *stage
 
   match:
-    needs: [train, train2, train3]
+    needs: [plan, train, train2, train3]
     # Після останнього етапу – навіть неповна мережа: краще перевірити її, ніж втратити.
     if: >-
-      always() && ((needs.train.result == 'success' && needs.train.outputs.done == 'true')
+      !cancelled() && ((needs.train.result == 'success' && needs.train.outputs.done == 'true')
       || (needs.train2.result == 'success' && needs.train2.outputs.done == 'true')
       || needs.train3.result == 'success')
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        shard: ${{ fromJSON(needs.plan.outputs.match_shards) }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -216,14 +328,20 @@ jobs:
         with:
           name: net
       - name: Матч нової мережі проти поточного Сірка
+        shell: bash
         env:
-          GAMES: ${{ inputs.games }}
+          GAMES: ${{ needs.plan.outputs.games }}
           SHARD: ${{ matrix.shard }}
         run: |
           pip install --break-system-packages chess==1.11.2
           cargo build --release
+          # Мережа, що не завантажилась, тихо лишила б вбудовану: матч був би сам із собою.
+          if printf 'uci\nsetoption name EvalFile value %s\nisready\nquit\n' "$PWD/sirko.nnue" \
+            | ./target/release/sirko | grep "не завантажено"; then
+            exit 1
+          fi
           python3 tools/match.py --a ./target/release/sirko --a-opt "EvalFile=$PWD/sirko.nnue" \
-            --b ./target/release/sirko --games "${GAMES}" --tc 8+0.08 --seed "${SHARD}" | tee match.txt
+            --b ./target/release/sirko --games "${GAMES}" --tc 8+0.08 --seed "${{ github.run_number }}${SHARD}" | tee match.txt
           grep "^\[" match.txt | tail -n 1 >"result-${SHARD}.txt"
       - uses: actions/upload-artifact@v7
         with:
@@ -231,27 +349,115 @@ jobs:
           path: result-${{ matrix.shard }}.txt
 
   verdict:
-    needs: match
-    if: always() && needs.match.result == 'success'
+    needs: [plan, match]
+    if: "!cancelled() && needs.match.result == 'success'"
     runs-on: ubuntu-24.04
+    outputs:
+      won: ${{ steps.v.outputs.won }}
+      line: ${{ steps.v.outputs.line }}
     steps:
       - uses: actions/download-artifact@v8
         with:
           pattern: result-*
           merge-multiple: true
       - name: Підсумок
+        id: v
+        shell: python3 {0}
+        env:
+          GAMES: ${{ needs.plan.outputs.games }}
+          SHARDS: ${{ needs.plan.outputs.match_shards }}
         run: |
-          cat result-*.txt
-          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
-          import glob, math, re
+          import glob, json, math, os, re
           w = d = l = 0
-          for f in glob.glob("result-*.txt"):
-              m = re.search(r"\+(\d+) =(\d+) -(\d+)", open(f).read())
+          for f in sorted(glob.glob("result-*.txt")):
+              text = open(f).read()
+              print(text.strip())
+              m = re.search(r"\+(\d+) =(\d+) -(\d+)", text)
               if m:
                   w += int(m[1]); d += int(m[2]); l += int(m[3])
           n = w + d + l
+          shards = len(json.loads(os.environ["SHARDS"]))
+          if n != shards * int(os.environ["GAMES"]):
+              raise SystemExit(f"неповний матч: {n} з {shards * int(os.environ['GAMES'])} партій")
           p = (w + d / 2) / n
           elo = -400 * math.log10(1 / p - 1) if 0 < p < 1 else float("nan")
           err = 400 / math.log(10) * 1.96 * math.sqrt(p * (1 - p) / n) / (p * (1 - p)) if 0 < p < 1 else float("nan")
-          print(f"Нова мережа проти поточного Сірка: +{w} ={d} -{l}, Elo {elo:+.0f} ± {err:.0f} ({n} партій)")
+          # Імовірність, що нова мережа справді сильніша (нічиї не рахуються).
+          los = 0.5 * (1 + math.erf((w - l) / math.sqrt(2 * (w + l)))) if w + l else 0.5
+          line = f"+{w} ={d} -{l}, Elo {elo:+.0f} ± {err:.0f} ({n} партій)"
+          summary = f"Нова мережа проти поточного Сірка: {line}, сильніша з імовірністю {100 * los:.1f}%"
+          print(summary)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write(summary + "\n")
+          won = los >= 0.975 and n >= 2000
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"won={'true' if won else 'false'}\n")
+              f.write(f"line={elo:+.0f} ± {err:.0f} Elo проти попередньої ({n} партій, 8+0,08 с)\n")
+          if not won:
+              why = "замало партій для злиття" if n < 2000 else "перевага не впевнена (треба 97,5%)"
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+                  f.write(f"У main не йде: {why}\n")
+
+  # Переможна мережа – у main: далі перевірки й release, а сервер поставить її вночі сам.
+  publish:
+    needs: [plan, train, verdict]
+    if: "!cancelled() && needs.verdict.result == 'success' && needs.plan.outputs.merge == 'true' && needs.verdict.outputs.won == 'true'"
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/download-artifact@v8
+        with:
+          name: net
+          path: new
+      - name: Мережа в main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ github.sha }}
+          HIDDEN: ${{ needs.plan.outputs.hidden }}
+          SAMPLES: ${{ needs.train.outputs.samples }}
+          LINE: ${{ needs.verdict.outputs.line }}
+        run: |
+          set -euo pipefail
+          # Нова мережа виграла в мережі, з якою почався запуск; якщо в main уже інша – не затираємо її.
+          same_net() { [ "$(git rev-parse "${BASE}:nets/sirko.nnue")" = "$(git rev-parse "$1:nets/sirko.nnue")" ]; }
+          if ! same_net HEAD; then
+            echo "::warning::мережа в main змінилась від початку запуску: нову не ставлю"
+            exit 0
+          fi
+          cp new/sirko.nnue nets/sirko.nnue
+          # Ті самі перевірки, що в CI, до пуша: зламаний main не дістанеться серверу й наступному тижню.
+          pip install --break-system-packages chess==1.11.2
+          cargo test --release
+          cargo build --release
+          test "$(./target/release/sirko perft 6 | cut -d' ' -f1)" = 119060324
+          python3 tools/uci_check.py ./target/release/sirko
+          ./target/release/sirko bench
+          millions=$(( ${SAMPLES:-0} / 1000000 ))
+          row="| Мережа самонавчання $(date -u +%Y-%m-%d): ${HIDDEN} нейронів, ${millions} млн позицій | ${LINE} |"
+          python3 - "$row" <<'PY'
+          import sys
+          s = open("README.md").read()
+          mark = "\n\nМережа вбудована в рушій"
+          assert s.count(mark) == 1, "у README немає місця для рядка"
+          s = s.replace(mark, "\n" + sys.argv[1] + mark)
+          open("README.md", "w").write(s)
           PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -qam "Мережа самонавчання: ${LINE}"
+          pushed=false
+          for _ in 1 2 3; do
+            if git push origin HEAD:main; then pushed=true; break; fi
+            git fetch -q origin main
+            same_net FETCH_HEAD || { echo "::warning::мережа в main змінилась під час пуша: нову не ставлю"; exit 0; }
+            git rebase -q FETCH_HEAD || { echo "::error::не вдалося перебазувати на свіжий main"; exit 1; }
+          done
+          "${pushed}" || { echo "::error::не вдалося запушити в main"; exit 1; }
+          # Пуш від імені дії не запускає інших дій: перевірку (а з нею й release) запускаємо самі.
+          gh workflow run check.yml --ref main

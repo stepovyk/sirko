@@ -7,10 +7,8 @@ use std::sync::OnceLock;
 pub const FILE_A: Bitboard = 0x0101_0101_0101_0101;
 pub const FILE_H: Bitboard = FILE_A << 7;
 pub const RANK_1: Bitboard = 0xFF;
-pub const RANK_2: Bitboard = RANK_1 << 8;
 pub const RANK_4: Bitboard = RANK_1 << 24;
 pub const RANK_5: Bitboard = RANK_1 << 32;
-pub const RANK_7: Bitboard = RANK_1 << 48;
 pub const RANK_8: Bitboard = RANK_1 << 56;
 
 #[inline(always)]

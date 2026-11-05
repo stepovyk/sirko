@@ -27,6 +27,10 @@ pub struct Engine {
     infinite: bool,
     net: Option<&'static Network>,
     search: Option<JoinHandle<()>>,
+    /// Опції змінено, таблицю ще не перебудовано.
+    stale: bool,
+    /// Таблиця щойно збудована й ще не бачила пошуку.
+    fresh: bool,
 }
 
 impl Default for Engine {
@@ -51,6 +55,8 @@ impl Engine {
             valid: true,
             infinite: false,
             search: None,
+            stale: false,
+            fresh: true,
         }
     }
 
@@ -67,9 +73,19 @@ impl Engine {
         self.shared.stop.store(false, Ordering::Relaxed);
     }
 
+    /// Нові Hash, Threads чи мережа: таблицю будуємо один раз, коли знадобиться, а не на кожну опцію
+    /// (lichess-bot задає їх по черзі на старті кожної партії, а таблиця – до кількох гігабайтів).
     fn resize(&mut self) {
         self.stop();
-        self.shared = Arc::new(Shared::new(self.hash, self.threads).with_net(self.net));
+        self.stale = true;
+    }
+
+    fn ensure(&mut self) {
+        if self.stale {
+            self.shared = Arc::new(Shared::new(self.hash, self.threads).with_net(self.net));
+            self.stale = false;
+            self.fresh = true;
+        }
     }
 
     fn set_position(&mut self, words: &[&str]) {
@@ -119,6 +135,8 @@ impl Engine {
 
     fn go(&mut self, words: &[&str]) {
         self.stop();
+        self.ensure();
+        self.fresh = false;
         let mut l = Limits::default();
         let mut it = words.iter();
         while let Some(&w) = it.next() {
@@ -170,8 +188,11 @@ impl Engine {
                 }
             };
             // На час суперника (і в нескінченному пошуку) відповідь іде лише після stop чи ponderhit,
-            // навіть якщо думати вже нема про що.
-            while (l.infinite || shared.pondering.load(Ordering::Relaxed))
+            // навіть якщо думати вже нема про що. Повний пошук чекає цього сам і скидає stop,
+            // тож тут чекаємо лише тоді, коли пошуку не було (немає ходів чи позиції).
+            let searched = valid && !r.best.is_none();
+            while !searched
+                && (l.infinite || shared.pondering.load(Ordering::Relaxed))
                 && !shared.stop.load(Ordering::Relaxed)
             {
                 std::thread::sleep(std::time::Duration::from_millis(2));
@@ -247,12 +268,16 @@ impl Engine {
             }
             "clear hash" => {
                 self.stop();
-                self.shared.tt.clear();
+                if !self.stale && !self.fresh {
+                    self.shared.tt.clear();
+                }
             }
             other => {
-                // Параметри пошуку (для підбору); Ponder та інші – приймаємо мовчки.
-                if let Ok(v) = value.parse::<i32>() {
-                    crate::params::set(other, v);
+                // Параметри пошуку – лише для підбору; Ponder та інші – приймаємо мовчки.
+                if crate::params::tuning_enabled() {
+                    if let Ok(v) = value.parse::<i32>() {
+                        crate::params::set(other, v);
+                    }
                 }
             }
         }
@@ -281,11 +306,19 @@ impl Engine {
                 }
                 println!("uciok");
             }
-            Some("isready") => println!("readyok"),
+            Some("isready") => {
+                self.ensure();
+                println!("readyok");
+            }
             Some("ucinewgame") => {
                 self.stop();
-                self.shared.tt.clear();
-                self.shared.clear_heuristics();
+                // Щойно збудована таблиця й так порожня: не чистимо її вдруге.
+                if self.stale || self.fresh {
+                    self.ensure();
+                } else {
+                    self.shared.tt.clear();
+                    self.shared.clear_heuristics();
+                }
             }
             Some("setoption") => self.setoption(line),
             Some("position") => {
