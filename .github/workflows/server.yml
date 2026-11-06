@@ -1,8 +1,8 @@
 name: Сервер
 
 # Сервер Сірка на безкоштовному Oracle Cloud: поки сервера немає, без перерви пробує його створити
-# (кожен запуск – до 5 год спроб щохвилини-півтори, нові стають у чергу щогодини; місце на ARM
-# з'являється нечасто), тоді ставить на нього Сірка й вимикає свій розклад.
+# (кожен запуск – до 5 год спроб щохвилини-півтори, тоді запускає наступний; місце на ARM
+# з'являється нечасто), тоді ставить на нього Сірка й вимикає себе. Розклад – запасний.
 # Ключ Lichess сюди не потрапляє: його дає людина на самому сервері (sudo sirko-bot token).
 on:
   schedule:
@@ -46,7 +46,7 @@ jobs:
         if: steps.access.outputs.ok == 'true'
         run: |
           python3 -m pip install -q --user --break-system-packages oci
-          TRY_MINUTES=${{ github.event_name == 'schedule' && 300 || 20 }} python3 deploy/oracle_server.py
+          TRY_MINUTES=300 python3 deploy/oracle_server.py
 
       - name: Встановити Сірка
         if: steps.oracle.outputs.ready == 'true'
@@ -85,3 +85,13 @@ jobs:
         run: |
           gh workflow disable server.yml -R "${GITHUB_REPOSITORY}"
           echo "Сервер готовий, розклад вимкнено. Ключ Lichess: sudo sirko-bot token на сервері." >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Наступна спроба
+        if: always() && steps.access.outputs.ok == 'true' && steps.oracle.outputs.ready != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FAILED: ${{ steps.oracle.outcome == 'failure' }}
+        run: |
+          # Після збою – пауза, щоб постійна помилка не крутилася без кінця.
+          if [ "${FAILED}" = true ]; then sleep 600; fi
+          gh workflow run server.yml -R "${GITHUB_REPOSITORY}" --ref "${GITHUB_REF_NAME}"
