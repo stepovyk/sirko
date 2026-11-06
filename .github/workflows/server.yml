@@ -1,11 +1,12 @@
 name: Сервер
 
-# Сервер Сірка на безкоштовному Oracle Cloud: поки сервера немає, кожні 10 хвилин пробує його
-# створити (місце на ARM з'являється нечасто), тоді ставить на нього Сірка й вимикає свій розклад.
+# Сервер Сірка на безкоштовному Oracle Cloud: поки сервера немає, без перерви пробує його створити
+# (кожен запуск – до 5 год спроб щохвилини-півтори, нові стають у чергу щогодини; місце на ARM
+# з'являється нечасто), тоді ставить на нього Сірка й вимикає свій розклад.
 # Ключ Lichess сюди не потрапляє: його дає людина на самому сервері (sudo sirko-bot token).
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "7 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -19,7 +20,7 @@ concurrency:
 jobs:
   server:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 355
     env:
       OCI_USER: ${{ secrets.OCI_USER }}
       OCI_TENANCY: ${{ secrets.OCI_TENANCY }}
@@ -45,7 +46,7 @@ jobs:
         if: steps.access.outputs.ok == 'true'
         run: |
           python3 -m pip install -q --user --break-system-packages oci
-          python3 deploy/oracle_server.py
+          TRY_MINUTES=${{ github.event_name == 'schedule' && 300 || 20 }} python3 deploy/oracle_server.py
 
       - name: Встановити Сірка
         if: steps.oracle.outputs.ready == 'true'

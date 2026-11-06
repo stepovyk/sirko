@@ -1,7 +1,8 @@
 """Сервер Сірка на безкоштовному Oracle Cloud (ARM A1): знаходить його або створює.
 
-Безкоштовні сервери ARM часто зайняті («Out of host capacity»), тож кожен запуск пробує всі
-зони доступності: спершу 2 ядра й 12 ГБ (уся безкоштовна межа), тоді 1 ядро й 6 ГБ. Сервер
+Безкоштовні сервери ARM часто зайняті («Out of host capacity»), тож кожні 90 с (протягом
+TRY_MINUTES) пробує всі зони доступності: спершу 2 ядра й 12 ГБ (уся безкоштовна межа), тоді
+1 ядро й 6 ГБ. Сервер
 отримує щотижневі безкоштовні резервні копії диска. Адресу пише в GITHUB_OUTPUT (ip=…).
 Доступ – з оточення: OCI_USER, OCI_TENANCY, OCI_FINGERPRINT, OCI_KEY, SERVER_AUTHORIZED_KEYS.
 """
@@ -56,33 +57,50 @@ def main():
                       if s.lifecycle_state == "AVAILABLE" and not s.prohibit_public_ip_on_vnic)
         ads = [ad.name for ad in identity.list_availability_domains(tenancy).data]
         inst = None
-        for ocpus, mem in SIZES:
-            for ad in ads:
-                details = oci.core.models.LaunchInstanceDetails(
-                    compartment_id=tenancy, availability_domain=ad, display_name=NAME, shape=SHAPE,
-                    shape_config=oci.core.models.LaunchInstanceShapeConfigDetails(ocpus=ocpus, memory_in_gbs=mem),
-                    source_details=oci.core.models.InstanceSourceViaImageDetails(image_id=image.id),
-                    create_vnic_details=oci.core.models.CreateVnicDetails(
-                        subnet_id=subnet.id, assign_public_ip=True, hostname_label="sirko"),
-                    metadata={"ssh_authorized_keys": os.environ["SERVER_AUTHORIZED_KEYS"].strip()})
-                try:
-                    inst = compute.launch_instance(details).data
-                except oci.exceptions.ServiceError as e:
-                    print(f"{ocpus} ×ARM, {mem} ГБ, {ad.split(':')[-1]}: {e.message}")
-                    if e.status == 429:
-                        time.sleep(30)
-                    elif "capacity" not in e.message.lower():
-                        raise
-                    continue
-                print(f"Створено сервер: {ocpus} ×ARM, {mem} ГБ, {ad.split(':')[-1]}, {image.display_name}")
+        deadline = time.monotonic() + 60 * float(os.environ.get("TRY_MINUTES", "0"))
+        tries = 0
+        while True:
+            inst = try_launch(compute, tenancy, ads, image, subnet, quiet=tries > 0)
+            tries += 1
+            if inst or time.monotonic() > deadline:
                 break
-            if inst:
-                break
+            time.sleep(90)
         if not inst:
-            print("Місця в Oracle поки немає, наступна спроба – за розкладом")
+            print(f"Місця в Oracle поки немає ({tries} спроб), наступні – за розкладом")
             out("ready", "false")
             return 0
+        print(f"Створено сервер з {tries}-ї спроби")
 
+    return finish(compute, network, storage, tenancy, every, inst)
+
+
+def try_launch(compute, tenancy, ads, image, subnet, quiet):
+    """Одна спроба в усіх зонах: спершу більший сервер, тоді менший. None – місця немає."""
+    for ocpus, mem in SIZES:
+        for ad in ads:
+            details = oci.core.models.LaunchInstanceDetails(
+                compartment_id=tenancy, availability_domain=ad, display_name=NAME, shape=SHAPE,
+                shape_config=oci.core.models.LaunchInstanceShapeConfigDetails(ocpus=ocpus, memory_in_gbs=mem),
+                source_details=oci.core.models.InstanceSourceViaImageDetails(image_id=image.id),
+                create_vnic_details=oci.core.models.CreateVnicDetails(
+                    subnet_id=subnet.id, assign_public_ip=True, hostname_label="sirko"),
+                metadata={"ssh_authorized_keys": os.environ["SERVER_AUTHORIZED_KEYS"].strip()})
+            try:
+                inst = compute.launch_instance(details).data
+            except oci.exceptions.ServiceError as e:
+                if e.status == 429:
+                    time.sleep(30)
+                elif "capacity" not in e.message.lower():
+                    raise
+                if not quiet:
+                    print(f"{ocpus} ×ARM, {mem} ГБ, {ad.split(':')[-1]}: {e.message}")
+                continue
+            print(f"Створено сервер: {ocpus} ×ARM, {mem} ГБ, {ad.split(':')[-1]}, {image.display_name}")
+            return inst
+    return None
+
+
+def finish(compute, network, storage, tenancy, every, inst):
     inst = oci.wait_until(compute, compute.get_instance(inst.id), "lifecycle_state", "RUNNING",
                           max_wait_seconds=900).data
     vnic_id = every(compute.list_vnic_attachments, tenancy, instance_id=inst.id).data[0].vnic_id
