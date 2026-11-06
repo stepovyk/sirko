@@ -6,7 +6,7 @@ name: Сервер
 # Ключ Lichess сюди не потрапляє: його дає людина на самому сервері (sudo sirko-bot token).
 on:
   schedule:
-    - cron: "7 * * * *"
+    - cron: "8 * * * *"
   workflow_dispatch:
 
 permissions:

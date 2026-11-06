@@ -5,7 +5,7 @@ name: Навчання мережі
 # і якщо нова мережа впевнено виграла, вона сама йде в main (далі – звичайні перевірки й release).
 on:
   schedule:
-    - cron: "17 21 * * 6"
+    - cron: "16 21 * * 6"
   workflow_dispatch:
     inputs:
       shards:

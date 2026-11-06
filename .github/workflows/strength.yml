@@ -4,7 +4,7 @@ name: Сила проти Stockfish
 on:
   # Щотижня після самонавчання: чи Сірко досі не слабший за свіжий Stockfish на найвищому обмеженні.
   schedule:
-    - cron: "17 5 * * 1"
+    - cron: "16 5 * * 1"
   workflow_dispatch:
     inputs:
       ref:
