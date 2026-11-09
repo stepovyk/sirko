@@ -38,7 +38,7 @@ jobs:
             echo "::notice::Немає доступу до Oracle в секретах репозиторію"
           fi
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         if: steps.access.outputs.ok == 'true'
 
       - name: Знайти або створити сервер
